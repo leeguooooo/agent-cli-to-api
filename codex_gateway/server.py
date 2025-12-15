@@ -181,6 +181,9 @@ async def chat_completions(
                     status = item.get("status") or ""
                     exit_code = item.get("exit_code")
                     logger.info("[%s] codex %s command status=%s exit=%s cmd=%s", resp_id, t, status, exit_code, cmd)
+                    out = item.get("aggregated_output")
+                    if isinstance(out, str) and out.strip():
+                        logger.info("[%s] codex command output:\n%s", resp_id, _truncate_for_log(out))
                     return
                 if itype == "file_change":
                     changes = item.get("changes") or []
