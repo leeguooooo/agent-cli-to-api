@@ -121,7 +121,7 @@ def _provider_default_model(provider: str) -> str | None:
     if provider == "codex":
         return settings.default_model
     if provider == "cursor-agent":
-        return settings.cursor_agent_model
+        return settings.cursor_agent_model or "auto"
     if provider == "claude":
         return settings.claude_model
     if provider == "gemini":
@@ -316,12 +316,15 @@ def _materialize_request_images(
 async def _log_startup_config() -> None:
     # Intentionally omit secrets (tokens, API keys).
     logger.info(
-        "Gateway config: workspace=%s provider=%s allow_client_provider_override=%s allow_client_model_override=%s default_model=%s model_reasoning_effort=%s force_reasoning_effort=%s use_codex_responses_api=%s max_concurrency=%s sse_keepalive_seconds=%s strip_answer_tags=%s debug_log=%s",
+        "Gateway config: workspace=%s provider=%s allow_client_provider_override=%s allow_client_model_override=%s default_model=%s cursor_agent_model=%s claude_model=%s gemini_model=%s model_reasoning_effort=%s force_reasoning_effort=%s use_codex_responses_api=%s max_concurrency=%s sse_keepalive_seconds=%s strip_answer_tags=%s debug_log=%s",
         settings.workspace,
         settings.provider,
         settings.allow_client_provider_override,
         settings.allow_client_model_override,
         settings.default_model,
+        settings.cursor_agent_model or "auto",
+        settings.claude_model,
+        settings.gemini_model,
         settings.model_reasoning_effort,
         settings.force_reasoning_effort,
         settings.use_codex_responses_api,
@@ -373,6 +376,9 @@ async def debug_config(authorization: str | None = Header(default=None)):
         "allow_client_provider_override": settings.allow_client_provider_override,
         "allow_client_model_override": settings.allow_client_model_override,
         "default_model": settings.default_model,
+        "cursor_agent_model": settings.cursor_agent_model or "auto",
+        "claude_model": settings.claude_model,
+        "gemini_model": settings.gemini_model,
         "model_reasoning_effort": settings.model_reasoning_effort,
         "force_reasoning_effort": settings.force_reasoning_effort,
         "use_codex_responses_api": settings.use_codex_responses_api,
@@ -476,6 +482,8 @@ async def chat_completions(
                 reasoning_effort,
                 len(prompt),
             )
+            eff_model = provider_model or _provider_default_model(provider) or ""
+            logger.info("[%s] provider_model effective=%s (client=%s)", resp_id, (eff_model or "<default>"), provider_model)
             logger.info(
                 "[%s] reasoning_effort source=%s forced=%s request=%s default=%s",
                 resp_id,
@@ -736,7 +744,10 @@ async def chat_completions(
                         text = result.text
                         usage = result.usage
                     elif provider == "cursor-agent":
-                        cursor_model = provider_model or settings.cursor_agent_model
+                        cursor_model = provider_model or settings.cursor_agent_model or "auto"
+                        if settings.debug_log:
+                            src = "request" if provider_model else ("env" if settings.cursor_agent_model else "default")
+                            logger.info("[%s] cursor-agent model=%s model_src=%s", resp_id, cursor_model, src)
                         cmd = [
                             settings.cursor_agent_bin,
                             "-p",
@@ -752,6 +763,8 @@ async def chat_completions(
                         if settings.cursor_agent_stream_partial_output:
                             cmd.append("--stream-partial-output")
                         cmd.append(prompt)
+                        if settings.debug_log:
+                            logger.info("[%s] cursor-agent cmd=%s", resp_id, " ".join(cmd[:12] + (["..."] if len(cmd) > 12 else [])))
 
                         assembler = TextAssembler()
                         fallback_text: str | None = None

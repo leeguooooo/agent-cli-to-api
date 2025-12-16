@@ -242,7 +242,7 @@ console.log(resp.choices[0].message.content);
 If you have other agent CLIs installed, you can either:
 
 - Force a single provider via `CODEX_PROVIDER=codex|cursor-agent|claude|gemini` (recommended for “API callers can’t choose agent”).
-  - For Cursor “auto”: set `CURSOR_AGENT_MODEL=auto` and keep `CODEX_ALLOW_CLIENT_MODEL_OVERRIDE=0` so client `model` strings are ignored.
+  - For Cursor “auto”: set `CURSOR_AGENT_MODEL=auto` and keep `CODEX_ALLOW_CLIENT_MODEL_OVERRIDE=0` so client `model` strings are ignored. If `CURSOR_AGENT_MODEL` is unset, it defaults to `auto`.
 - Or keep `CODEX_PROVIDER=auto` and select providers per-request by prefixing `model`:
 
 - Codex CLI: `"gpt-5.2"` (default) or any Codex model id
