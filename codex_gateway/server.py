@@ -104,6 +104,31 @@ def _parse_provider_model(model: str) -> tuple[str, str | None]:
     return "codex", raw
 
 
+def _normalize_provider(raw: str | None) -> str:
+    p = (raw or "").strip().lower()
+    if not p:
+        return "auto"
+    if p in {"auto", "codex", "cursor-agent", "claude", "gemini"}:
+        return p
+    if p in {"cursor", "cursor_agent", "cursoragent"}:
+        return "cursor-agent"
+    if p in {"claude-code", "claude_code", "claudecode"}:
+        return "claude"
+    return "auto"
+
+
+def _provider_default_model(provider: str) -> str | None:
+    if provider == "codex":
+        return settings.default_model
+    if provider == "cursor-agent":
+        return settings.cursor_agent_model
+    if provider == "claude":
+        return settings.claude_model
+    if provider == "gemini":
+        return settings.gemini_model
+    return None
+
+
 def _looks_like_unsupported_model_error(message: str) -> bool:
     msg = (message or "").strip()
     if not msg:
@@ -291,8 +316,10 @@ def _materialize_request_images(
 async def _log_startup_config() -> None:
     # Intentionally omit secrets (tokens, API keys).
     logger.info(
-        "Gateway config: workspace=%s default_model=%s model_reasoning_effort=%s force_reasoning_effort=%s use_codex_responses_api=%s max_concurrency=%s sse_keepalive_seconds=%s strip_answer_tags=%s debug_log=%s",
+        "Gateway config: workspace=%s provider=%s allow_client_provider_override=%s default_model=%s model_reasoning_effort=%s force_reasoning_effort=%s use_codex_responses_api=%s max_concurrency=%s sse_keepalive_seconds=%s strip_answer_tags=%s debug_log=%s",
         settings.workspace,
+        settings.provider,
+        settings.allow_client_provider_override,
         settings.default_model,
         settings.model_reasoning_effort,
         settings.force_reasoning_effort,
@@ -312,7 +339,9 @@ async def healthz():
 @app.get("/v1/models")
 async def list_models(authorization: str | None = Header(default=None)):
     _check_auth(authorization)
-    models = settings.advertised_models[:] if settings.advertised_models else [settings.default_model]
+    forced_provider = _normalize_provider(settings.provider)
+    default_id = _provider_default_model(forced_provider) or settings.default_model
+    models = settings.advertised_models[:] if settings.advertised_models else [default_id]
     if settings.model_aliases:
         models.extend(settings.model_aliases.keys())
         models.extend(settings.model_aliases.values())
@@ -339,6 +368,8 @@ async def debug_config(authorization: str | None = Header(default=None)):
     """
     _check_auth(authorization)
     return {
+        "provider": settings.provider,
+        "allow_client_provider_override": settings.allow_client_provider_override,
         "default_model": settings.default_model,
         "model_reasoning_effort": settings.model_reasoning_effort,
         "force_reasoning_effort": settings.force_reasoning_effort,
@@ -368,9 +399,18 @@ async def chat_completions(
 ):
     _check_auth(authorization)
 
-    requested_model = req.model or settings.default_model
+    forced_provider = _normalize_provider(settings.provider)
+    fallback_model = (
+        _provider_default_model(forced_provider if forced_provider != "auto" else "codex") or settings.default_model
+    )
+    requested_model = (req.model or fallback_model).strip()
     resolved_model = settings.model_aliases.get(requested_model, requested_model)
-    provider, provider_model = _parse_provider_model(resolved_model)
+    parsed_provider, provider_model = _parse_provider_model(resolved_model)
+    if settings.allow_client_provider_override or forced_provider == "auto":
+        provider = parsed_provider
+    else:
+        # Operator forces a single provider for the whole gateway; ignore request-side provider prefixes.
+        provider = forced_provider
     allowed_efforts = {"low", "medium", "high", "xhigh"}
 
     def _normalize_effort(raw: str | None) -> str | None:

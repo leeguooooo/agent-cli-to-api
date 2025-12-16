@@ -7,6 +7,7 @@ from typing import Literal
 
 SandboxMode = Literal["read-only", "workspace-write", "danger-full-access"]
 ApprovalPolicy = Literal["untrusted", "on-failure", "on-request", "never"]
+GatewayProvider = Literal["auto", "codex", "cursor-agent", "claude", "gemini"]
 
 _GATEWAY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 _DEFAULT_CODEX_CLI_HOME = os.path.join(_GATEWAY_ROOT, ".codex-gateway-home")
@@ -118,6 +119,13 @@ class Settings:
     )
 
     # Optional other agent CLIs (multi-provider).
+    # Provider routing:
+    # - "auto": choose provider from request `model` prefixes (legacy behavior).
+    # - otherwise: force a single provider for the whole gateway (operator-controlled).
+    provider: GatewayProvider = _env_str("CODEX_PROVIDER", "auto").strip().lower()  # type: ignore[assignment]
+    # If true, always allow request `model` prefixes (cursor:/claude:/gemini:) to override provider.
+    allow_client_provider_override: bool = _env_bool("CODEX_ALLOW_CLIENT_PROVIDER_OVERRIDE", False)
+
     cursor_agent_bin: str = os.environ.get("CURSOR_AGENT_BIN", "cursor-agent")
     cursor_agent_api_key: str | None = os.environ.get("CURSOR_AGENT_API_KEY") or os.environ.get("CURSOR_API_KEY")
     cursor_agent_model: str | None = (_env_str("CURSOR_AGENT_MODEL", "").strip() or None)
