@@ -10,7 +10,7 @@ Supported backends:
 - OpenAI Codex (defaults to backend `/responses` for vision; falls back to `codex exec`)
 - Cursor Agent CLI (`cursor-agent`)
 - Claude Code CLI (`claude`)
-- Gemini CLI (`gemini`)
+- Gemini CLI (`gemini`) or Gemini CloudCode direct (set `GEMINI_USE_CLOUDCODE_API=1`)
 
 Why this exists:
 - Many tools/SDKs only speak the OpenAI API (`/v1/chat/completions`) — this lets you plug agent CLIs into that ecosystem.
@@ -199,6 +199,7 @@ console.log(resp.choices[0].message.content);
 
 ## Configuration (env vars)
 
+- `CODEX_NO_DOTENV`: `1/0` (default: `0`) disable auto-loading `.env` when running `uvicorn main:app`
 - `CODEX_WORKSPACE`: directory passed to `codex exec --cd`
 - `CODEX_CLI_HOME`: override HOME for the `codex` subprocess (default: `./.codex-gateway-home`)
 - `CODEX_USE_SYSTEM_CODEX_HOME`: `1/0` (default: `0`) use your normal `~/.codex` config instead of the gateway home
@@ -258,6 +259,10 @@ Optional env vars:
 - `CURSOR_AGENT_WORKSPACE`: override `--workspace` just for `cursor-agent` (use an empty dir to avoid repo reads for automation workloads)
 - `CURSOR_AGENT_DISABLE_INDEXING`: `1/0` (default: `1`) pass `--disable-indexing` to `cursor-agent`
 - `CURSOR_AGENT_EXTRA_ARGS`: extra CLI flags passed to `cursor-agent` (e.g. `--endpoint ... --http-version 2`)
+- `GEMINI_USE_CLOUDCODE_API`: `1/0` (default: `0`) call Gemini Cloud Code Assist directly (Gemini CLI backend) using local OAuth cache
+- `GEMINI_OAUTH_CREDS_PATH`: path to Gemini OAuth cache (default: `~/.gemini/oauth_creds.json`)
+- `GEMINI_PROJECT_ID`: optional fixed GCP project id for CloudCode (if unset, the gateway auto-picks the first ACTIVE project and caches it)
+- `GEMINI_OAUTH_CLIENT_ID`, `GEMINI_OAUTH_CLIENT_SECRET`: optional; only needed if the gateway can’t auto-detect the Gemini CLI OAuth client from your local `gemini` binary
 
 ## Keywords (SEO)
 

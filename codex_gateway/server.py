@@ -24,6 +24,8 @@ from .codex_responses import (
     maybe_refresh_codex_auth,
 )
 from .config import settings
+from .gemini_cloudcode import generate_cloudcode as gemini_cloudcode_generate
+from .gemini_cloudcode import iter_cloudcode_stream_events as iter_gemini_cloudcode_events
 from .openai_compat import ChatCompletionRequest, ChatMessage, ErrorResponse, extract_image_urls, messages_to_prompt
 from .stream_json_cli import (
     TextAssembler,
@@ -316,7 +318,7 @@ def _materialize_request_images(
 async def _log_startup_config() -> None:
     # Intentionally omit secrets (tokens, API keys).
     logger.info(
-        "Gateway config: workspace=%s provider=%s allow_client_provider_override=%s allow_client_model_override=%s default_model=%s cursor_agent_model=%s claude_model=%s gemini_model=%s model_reasoning_effort=%s force_reasoning_effort=%s use_codex_responses_api=%s max_concurrency=%s sse_keepalive_seconds=%s strip_answer_tags=%s debug_log=%s",
+        "Gateway config: workspace=%s provider=%s allow_client_provider_override=%s allow_client_model_override=%s default_model=%s cursor_agent_model=%s claude_model=%s gemini_model=%s gemini_use_cloudcode_api=%s model_reasoning_effort=%s force_reasoning_effort=%s use_codex_responses_api=%s max_concurrency=%s sse_keepalive_seconds=%s strip_answer_tags=%s debug_log=%s",
         settings.workspace,
         settings.provider,
         settings.allow_client_provider_override,
@@ -325,6 +327,7 @@ async def _log_startup_config() -> None:
         settings.cursor_agent_model or "auto",
         settings.claude_model,
         settings.gemini_model,
+        settings.gemini_use_cloudcode_api,
         settings.model_reasoning_effort,
         settings.force_reasoning_effort,
         settings.use_codex_responses_api,
@@ -382,6 +385,11 @@ async def debug_config(authorization: str | None = Header(default=None)):
         "cursor_agent_extra_args": settings.cursor_agent_extra_args,
         "claude_model": settings.claude_model,
         "gemini_model": settings.gemini_model,
+        "gemini_use_cloudcode_api": settings.gemini_use_cloudcode_api,
+        "gemini_cloudcode_base_url": settings.gemini_cloudcode_base_url,
+        "gemini_project_id": settings.gemini_project_id,
+        "gemini_oauth_creds_path": settings.gemini_oauth_creds_path,
+        "gemini_oauth_client_id": settings.gemini_oauth_client_id,
         "model_reasoning_effort": settings.model_reasoning_effort,
         "force_reasoning_effort": settings.force_reasoning_effort,
         "use_codex_responses_api": settings.use_codex_responses_api,
@@ -454,6 +462,7 @@ async def chat_completions(
     resp_id = f"chatcmpl-{uuid.uuid4().hex}"
 
     image_urls = extract_image_urls(req.messages)
+    use_gemini_cloudcode = bool(provider == "gemini" and settings.gemini_use_cloudcode_api)
     use_codex_backend = bool(
         provider == "codex"
         and (
@@ -466,6 +475,12 @@ async def chat_completions(
 
     sem = _get_semaphore()
     try:
+        mode_label = "cli"
+        if provider == "codex" and use_codex_backend:
+            mode_label = "codex-responses"
+        elif provider == "gemini" and use_gemini_cloudcode:
+            mode_label = "gemini-cloudcode"
+
         effort_source = "default"
         if forced_effort:
             effort_source = "forced"
@@ -480,7 +495,7 @@ async def chat_completions(
                 requested_model,
                 resolved_model,
                 provider,
-                ("codex-responses" if use_codex_backend else "cli"),
+                mode_label,
                 req.stream,
                 reasoning_effort,
                 len(prompt),
@@ -503,7 +518,7 @@ async def chat_completions(
                 requested_model,
                 resolved_model,
                 provider,
-                ("codex-responses" if use_codex_backend else "cli"),
+                mode_label,
                 req.stream,
                 reasoning_effort,
                 effort_source,
@@ -841,26 +856,44 @@ async def chat_completions(
                                 fallback_text = evt["result"]
                         text = assembler.text or (fallback_text or "")
                     elif provider == "gemini":
-                        gemini_model = provider_model or settings.gemini_model
-                        cmd = [settings.gemini_bin, "-o", "stream-json"]
-                        if gemini_model:
-                            cmd.extend(["-m", gemini_model])
-                        cmd.append(prompt)
+                        gemini_model = provider_model or settings.gemini_model or "gemini-2.5-pro"
+                        if use_gemini_cloudcode:
+                            if settings.debug_log:
+                                logger.info(
+                                    "[%s] gemini-cloudcode url=%s/v1internal:generateContent model=%s creds=%s",
+                                    resp_id,
+                                    settings.gemini_cloudcode_base_url,
+                                    gemini_model,
+                                    settings.gemini_oauth_creds_path,
+                                )
+                            msgs = _maybe_inject_automation_guard_messages(req.messages)
+                            req2 = ChatCompletionRequest(model=req.model, messages=msgs, stream=req.stream)
+                            text, usage = await gemini_cloudcode_generate(
+                                req2,
+                                model_name=gemini_model,
+                                reasoning_effort=reasoning_effort,
+                                timeout_seconds=settings.timeout_seconds,
+                            )
+                        else:
+                            cmd = [settings.gemini_bin, "-o", "stream-json"]
+                            if gemini_model:
+                                cmd.extend(["-m", gemini_model])
+                            cmd.append(prompt)
 
-                        assembler = TextAssembler()
-                        async for evt in iter_stream_json_events(
-                            cmd=cmd,
-                            env=None,
-                            timeout_seconds=settings.timeout_seconds,
-                            stream_limit=settings.subprocess_stream_limit,
-                            event_callback=_evt_log,
-                            stderr_callback=_stderr_log,
-                        ):
-                            extract_gemini_delta(evt, assembler)
-                            maybe_usage = extract_usage_from_gemini_result(evt)
-                            if maybe_usage:
-                                usage = maybe_usage
-                        text = assembler.text
+                            assembler = TextAssembler()
+                            async for evt in iter_stream_json_events(
+                                cmd=cmd,
+                                env=None,
+                                timeout_seconds=settings.timeout_seconds,
+                                stream_limit=settings.subprocess_stream_limit,
+                                event_callback=_evt_log,
+                                stderr_callback=_stderr_log,
+                            ):
+                                extract_gemini_delta(evt, assembler)
+                                maybe_usage = extract_usage_from_gemini_result(evt)
+                                if maybe_usage:
+                                    usage = maybe_usage
+                            text = assembler.text
                     else:
                         raise RuntimeError(f"Unknown provider: {provider}")
             finally:
@@ -1038,19 +1071,38 @@ async def chat_completions(
                                 stderr_callback=_stderr_log,
                             )
                         elif provider == "gemini":
-                            gemini_model = provider_model or settings.gemini_model
-                            cmd = [settings.gemini_bin, "-o", "stream-json"]
-                            if gemini_model:
-                                cmd.extend(["-m", gemini_model])
-                            cmd.append(prompt)
-                            events = iter_stream_json_events(
-                                cmd=cmd,
-                                env=None,
-                                timeout_seconds=settings.timeout_seconds,
-                                stream_limit=settings.subprocess_stream_limit,
-                                event_callback=_evt_log,
-                                stderr_callback=_stderr_log,
-                            )
+                            gemini_model = provider_model or settings.gemini_model or "gemini-2.5-pro"
+                            if use_gemini_cloudcode:
+                                if settings.debug_log:
+                                    logger.info(
+                                        "[%s] gemini-cloudcode url=%s/v1internal:streamGenerateContent?alt=sse model=%s creds=%s",
+                                        resp_id,
+                                        settings.gemini_cloudcode_base_url,
+                                        gemini_model,
+                                        settings.gemini_oauth_creds_path,
+                                    )
+                                msgs = _maybe_inject_automation_guard_messages(req.messages)
+                                req2 = ChatCompletionRequest(model=req.model, messages=msgs, stream=req.stream)
+                                events = iter_gemini_cloudcode_events(
+                                    req2,
+                                    model_name=gemini_model,
+                                    reasoning_effort=reasoning_effort,
+                                    timeout_seconds=settings.timeout_seconds,
+                                    event_callback=_evt_log if settings.debug_log else None,
+                                )
+                            else:
+                                cmd = [settings.gemini_bin, "-o", "stream-json"]
+                                if gemini_model:
+                                    cmd.extend(["-m", gemini_model])
+                                cmd.append(prompt)
+                                events = iter_stream_json_events(
+                                    cmd=cmd,
+                                    env=None,
+                                    timeout_seconds=settings.timeout_seconds,
+                                    stream_limit=settings.subprocess_stream_limit,
+                                    event_callback=_evt_log,
+                                    stderr_callback=_stderr_log,
+                                )
                         else:
                             raise RuntimeError(f"Unknown provider: {provider}")
 

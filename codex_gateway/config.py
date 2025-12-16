@@ -4,6 +4,7 @@ import json
 import os
 import shlex
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 SandboxMode = Literal["read-only", "workspace-write", "danger-full-access"]
@@ -12,6 +13,46 @@ GatewayProvider = Literal["auto", "codex", "cursor-agent", "claude", "gemini"]
 
 _GATEWAY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 _DEFAULT_CODEX_CLI_HOME = os.path.join(_GATEWAY_ROOT, ".codex-gateway-home")
+
+
+def _maybe_load_dotenv(path: Path) -> None:
+    """
+    Minimal .env loader (no dependency) so `uvicorn main:app` works out of the box.
+    - Existing process env always wins.
+    - Disable by setting `CODEX_NO_DOTENV=1`.
+    """
+    if os.environ.get("CODEX_NO_DOTENV"):
+        return
+    if not path.exists() or not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if value and value[0] in {"'", '"'} and value[-1] == value[0]:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def _autoload_dotenv() -> None:
+    # Load from CWD first, then repo root (same policy as the CLI entrypoint).
+    cwd_env = Path.cwd() / ".env"
+    _maybe_load_dotenv(cwd_env)
+    repo_env = Path(_GATEWAY_ROOT) / ".env"
+    if repo_env != cwd_env:
+        _maybe_load_dotenv(repo_env)
+
+
+_autoload_dotenv()
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -152,6 +193,19 @@ class Settings:
 
     gemini_bin: str = os.environ.get("GEMINI_BIN", "gemini")
     gemini_model: str | None = (_env_str("GEMINI_MODEL", "").strip() or None)
+    # Gemini "CLI" direct upstream (Cloud Code Assist) mode (CLIProxyAPI-style).
+    # Uses the local Gemini CLI OAuth cache by default, so no API key is needed.
+    gemini_use_cloudcode_api: bool = _env_bool("GEMINI_USE_CLOUDCODE_API", False)
+    gemini_oauth_creds_path: str = os.path.expanduser(
+        _env_str("GEMINI_OAUTH_CREDS_PATH", "~/.gemini/oauth_creds.json").strip() or "~/.gemini/oauth_creds.json"
+    )
+    # OAuth client credentials are intentionally not embedded in the repo (push-protection).
+    # If unset, the gateway will try to auto-detect them from the installed `gemini` CLI binary
+    # when it needs to refresh access tokens.
+    gemini_oauth_client_id: str = _env_str("GEMINI_OAUTH_CLIENT_ID", "").strip()
+    gemini_oauth_client_secret: str = _env_str("GEMINI_OAUTH_CLIENT_SECRET", "").strip()
+    gemini_cloudcode_base_url: str = _env_str("GEMINI_CLOUDCODE_BASE_URL", "https://cloudcode-pa.googleapis.com").strip()
+    gemini_project_id: str = _env_str("GEMINI_PROJECT_ID", "").strip()
 
     # Hard safety caps.
     max_prompt_chars: int = _env_int("CODEX_MAX_PROMPT_CHARS", 200_000)
