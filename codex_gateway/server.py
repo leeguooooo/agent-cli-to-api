@@ -158,6 +158,48 @@ def _truncate_for_log(text: str) -> str:
     return f"{text[:limit]}\n... (truncated, {len(text)} chars total)"
 
 
+_AUTOMATION_GUARD = """SYSTEM: IMPORTANT (Open-AutoGLM action mode)
+- This is an Android UI automation loop. You will be given a screenshot each turn.
+- Output must be machine-parseable and contain exactly ONE action.
+- Follow the required format exactly:
+  <think>short reason</think>
+  <answer>do(...)</answer> OR <answer>finish(...)</answer>
+- The <answer> must contain ONLY the action expression (no extra text).
+- Never refuse due to environment/sandbox/tool limitations; you are NOT executing actions yourself.
+- If you are uncertain or need confirmation, output: do(action="Wait", duration="1 seconds")
+- For WeChat message sending: only finish if the latest screenshot clearly shows the outgoing message bubble
+  with the exact text AND no failure indicator (red "!", "发送失败/未发送/重发", spinner/clock). Otherwise retry/Wait.
+"""
+
+
+def _looks_like_automation_prompt(prompt: str) -> bool:
+    p = prompt or ""
+    if not p:
+        return False
+    # Open-AutoGLM style: XML tags + do(action=...) definitions in the system prompt.
+    markers = (
+        "<think>{think}</think>",
+        "<answer>{action}</answer>",
+        "do(action=\"Tap\"",
+        "do(action=\"Launch\"",
+        "finish(message=",
+        "Tap是点击操作",
+        "finish是结束任务",
+    )
+    return any(m in p for m in markers)
+
+
+def _maybe_inject_automation_guard(prompt: str) -> str:
+    if not prompt:
+        return prompt
+    if not _looks_like_automation_prompt(prompt):
+        return prompt
+    # Avoid duplicating if already present.
+    if "IMPORTANT (Open-AutoGLM action mode)" in prompt:
+        return prompt
+    return f"{_AUTOMATION_GUARD}\n\n{prompt}"
+
+
 def _mime_to_ext(mime: str) -> str:
     mime = (mime or "").strip().lower()
     if mime in {"image/png", "png"}:
@@ -262,7 +304,7 @@ async def chat_completions(
     resolved_model = settings.model_aliases.get(requested_model, requested_model)
     provider, provider_model = _parse_provider_model(resolved_model)
     reasoning_effort = _extract_reasoning_effort(req) or settings.model_reasoning_effort
-    prompt = messages_to_prompt(req.messages)
+    prompt = _maybe_inject_automation_guard(messages_to_prompt(req.messages))
     if len(prompt) > settings.max_prompt_chars:
         return _openai_error(f"Prompt too large ({len(prompt)} chars)", status_code=413)
 
@@ -295,6 +337,13 @@ async def chat_completions(
                 return _openai_error(f"Failed to decode image input: {e}", status_code=400)
 
             if settings.debug_log and image_files:
+                for idx, path in enumerate(image_files):
+                    try:
+                        size = os.path.getsize(path)
+                    except OSError:
+                        size = -1
+                    ext = os.path.splitext(path)[1].lstrip(".") or "bin"
+                    logger.info("[%s] image[%d] ext=%s bytes=%d", resp_id, idx, ext, size)
                 logger.info("[%s] decoded_images=%d", resp_id, len(image_files))
 
         def _evt_log(evt: dict) -> None:
@@ -339,6 +388,40 @@ async def chat_completions(
                                     paths.append(ch["path"])
                     logger.info("[%s] codex %s file_change %s", resp_id, t, ", ".join(paths)[: settings.log_max_chars])
                     return
+                if itype == "mcp_tool_call":
+                    server = item.get("server")
+                    tool = item.get("tool")
+                    status = item.get("status")
+                    logger.info(
+                        "[%s] codex %s mcp_tool_call server=%s tool=%s status=%s",
+                        resp_id,
+                        t,
+                        server,
+                        tool,
+                        status,
+                    )
+                    args = item.get("arguments")
+                    if args:
+                        try:
+                            dumped = json.dumps(args, ensure_ascii=False, default=str)
+                        except Exception:
+                            dumped = str(args)
+                        logger.info("[%s] codex mcp_tool_call args:\n%s", resp_id, _truncate_for_log(dumped))
+                    err = item.get("error")
+                    if err:
+                        try:
+                            dumped = json.dumps(err, ensure_ascii=False, default=str)
+                        except Exception:
+                            dumped = str(err)
+                        logger.warning("[%s] codex mcp_tool_call error:\n%s", resp_id, _truncate_for_log(dumped))
+                    result = item.get("result")
+                    if result:
+                        try:
+                            dumped = json.dumps(result, ensure_ascii=False, default=str)
+                        except Exception:
+                            dumped = str(result)
+                        logger.info("[%s] codex mcp_tool_call result:\n%s", resp_id, _truncate_for_log(dumped))
+                    return
                 if itype == "agent_message":
                     text = _maybe_strip_answer_tags(str(item.get("text") or ""))
                     logger.info("[%s] codex %s agent_message_chars=%d", resp_id, t, len(text))
@@ -370,6 +453,7 @@ async def chat_completions(
                                 cd=settings.workspace,
                                 images=image_files,
                                 disable_shell_tool=settings.disable_shell_tool,
+                                disable_view_image_tool=settings.disable_view_image_tool,
                                 sandbox=settings.sandbox,
                                 skip_git_repo_check=settings.skip_git_repo_check,
                                 model_reasoning_effort=reasoning_effort,
@@ -548,6 +632,7 @@ async def chat_completions(
                                 cd=settings.workspace,
                                 images=image_files,
                                 disable_shell_tool=settings.disable_shell_tool,
+                                disable_view_image_tool=settings.disable_view_image_tool,
                                 sandbox=settings.sandbox,
                                 skip_git_repo_check=settings.skip_git_repo_check,
                                 model_reasoning_effort=reasoning_effort,

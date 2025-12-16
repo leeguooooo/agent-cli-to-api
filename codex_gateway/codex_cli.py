@@ -82,6 +82,7 @@ def _build_codex_exec_cmd(
     cd: str,
     images: list[str],
     disable_shell_tool: bool,
+    disable_view_image_tool: bool,
     sandbox: SandboxMode,
     approval_policy: ApprovalPolicy,
     enable_search: bool,
@@ -95,6 +96,8 @@ def _build_codex_exec_cmd(
     cmd: list[str] = ["codex", "-a", approval_policy]
     if disable_shell_tool:
         cmd.extend(["--disable", "shell_tool"])
+    if disable_view_image_tool:
+        cmd.extend(["--disable", "view_image_tool"])
     if enable_search:
         cmd.append("--search")
 
@@ -140,6 +143,7 @@ async def run_codex_final(
     cd: str,
     images: list[str],
     disable_shell_tool: bool,
+    disable_view_image_tool: bool,
     sandbox: SandboxMode,
     skip_git_repo_check: bool,
     model_reasoning_effort: str | None,
@@ -162,6 +166,7 @@ async def run_codex_final(
         cd=cd,
         images=images,
         disable_shell_tool=disable_shell_tool,
+        disable_view_image_tool=disable_view_image_tool,
         sandbox=sandbox,
         approval_policy=approval_policy,
         enable_search=enable_search,
@@ -198,6 +203,7 @@ async def iter_codex_events(
     cd: str,
     images: list[str],
     disable_shell_tool: bool,
+    disable_view_image_tool: bool,
     sandbox: SandboxMode,
     skip_git_repo_check: bool,
     model_reasoning_effort: str | None,
@@ -223,6 +229,7 @@ async def iter_codex_events(
         cd=cd,
         images=images,
         disable_shell_tool=disable_shell_tool,
+        disable_view_image_tool=disable_view_image_tool,
         sandbox=sandbox,
         approval_policy=approval_policy,
         enable_search=enable_search,

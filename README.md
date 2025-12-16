@@ -48,6 +48,15 @@ cp .env.example .env
 ./scripts/serve.sh
 ```
 
+### With `uvx` (no venv, no clone)
+
+You still need the agent CLI(s) (`codex`, `cursor-agent`, `claude`, `gemini`) installed on your system `PATH`.
+
+```bash
+cp .env.example .env
+uvx --from git+https://github.com/leeguooooo/agent-cli-to-api --env-file .env agent-cli-to-api
+```
+
 ```bash
 export CODEX_WORKSPACE=/path/to/your/workspace
 export CODEX_GATEWAY_TOKEN=devtoken   # optional but recommended
@@ -118,6 +127,33 @@ curl -N http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
+### Example (vision / screenshot)
+
+When `CODEX_DEBUG_LOG=1`, the gateway logs `image[0] ext=... bytes=...` and `decoded_images=N` so you can confirm images are being received/decoded.
+
+```bash
+python - <<'PY' > /tmp/payload.json
+import base64, json
+img_b64 = base64.b64encode(open("screenshot.png","rb").read()).decode()
+print(json.dumps({
+  "model": "gpt-5-codex",
+  "stream": False,
+  "messages": [{
+    "role": "user",
+    "content": [
+      {"type": "text", "text": "读取图片里的文字，只输出文字本身"},
+      {"type": "image_url", "image_url": {"url": "data:image/png;base64," + img_b64}},
+    ],
+  }],
+}))
+PY
+
+curl -s http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer devtoken" \
+  -d @/tmp/payload.json
+```
+
 ### OpenAI SDK examples
 
 Python:
@@ -163,6 +199,7 @@ console.log(resp.choices[0].message.content);
 - `CODEX_SANDBOX`: `read-only` | `workspace-write` | `danger-full-access` (default: `read-only`)
 - `CODEX_APPROVAL_POLICY`: `untrusted|on-failure|on-request|never` (default: `never`)
 - `CODEX_DISABLE_SHELL_TOOL`: `1/0` (default: `1`) disable Codex shell tool so responses stay "model-like" and avoid surprise command executions
+- `CODEX_DISABLE_VIEW_IMAGE_TOOL`: `1/0` (default: `1`) disable Codex `view_image_tool` so models prefer native vision (reduces MCP tool calls; helpful for screenshot-based agents like Open-AutoGLM)
 - `CODEX_ENABLE_SEARCH`: `1/0` (default: `0`)
 - `CODEX_ADD_DIRS`: comma-separated extra writable dirs (default: empty)
 - `CODEX_SKIP_GIT_REPO_CHECK`: `1/0` (default: `1`)

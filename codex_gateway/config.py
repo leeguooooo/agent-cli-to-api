@@ -99,6 +99,8 @@ class Settings:
     model_aliases: dict[str, str] = field(default_factory=lambda: _env_json_dict_str_str("CODEX_MODEL_ALIASES"))
     advertised_models: list[str] = field(default_factory=lambda: _env_csv("CODEX_ADVERTISED_MODELS"))
     disable_shell_tool: bool = _env_bool("CODEX_DISABLE_SHELL_TOOL", True)
+    # Avoid Codex preferring the MCP-based image tool over native vision input.
+    disable_view_image_tool: bool = _env_bool("CODEX_DISABLE_VIEW_IMAGE_TOOL", True)
 
     # Optional other agent CLIs (multi-provider).
     cursor_agent_bin: str = os.environ.get("CURSOR_AGENT_BIN", "cursor-agent")
