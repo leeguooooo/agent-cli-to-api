@@ -26,6 +26,19 @@ def _maybe_load_dotenv(path: Path) -> None:
         os.environ.setdefault(key, value)
 
 
+def _default_env_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    cwd_env = Path.cwd() / ".env"
+    if cwd_env.exists() and cwd_env.is_file():
+        candidates.append(cwd_env)
+    # If invoked outside the project directory, fall back to the repo root where this
+    # package lives (no-op when installed without a bundled .env).
+    repo_env = Path(__file__).resolve().parents[1] / ".env"
+    if repo_env.exists() and repo_env.is_file() and repo_env not in candidates:
+        candidates.append(repo_env)
+    return candidates
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-cli-to-api",
@@ -54,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--env-file",
-        default=os.environ.get("CODEX_ENV_FILE"),
+        default=os.environ.get("CODEX_ENV_FILE") or os.environ.get("CODEX_GATEWAY_ENV_FILE"),
         help="Optionally load environment variables from this .env file.",
     )
     parser.add_argument(
@@ -70,9 +83,19 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     if args.env_file:
-        _maybe_load_dotenv(Path(args.env_file))
+        path = Path(args.env_file)
+        _maybe_load_dotenv(path)
+        if path.exists():
+            print(f"[agent-cli-to-api] loaded env: {path}")
     elif not args.no_env:
-        _maybe_load_dotenv(Path.cwd() / ".env")
+        loaded = False
+        for candidate in _default_env_candidates():
+            _maybe_load_dotenv(candidate)
+            print(f"[agent-cli-to-api] loaded env: {candidate}")
+            loaded = True
+            break
+        if not loaded:
+            print("[agent-cli-to-api] no .env found; using process environment")
 
     uvicorn.run(
         "codex_gateway.server:app",
@@ -84,4 +107,3 @@ def main(argv: list[str] | None = None) -> None:
 
 
 __all__ = ["main"]
-

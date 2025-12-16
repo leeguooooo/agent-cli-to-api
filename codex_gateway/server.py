@@ -15,8 +15,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .codex_cli import collect_codex_text_and_usage_from_events, iter_codex_events
+from .codex_responses import (
+    build_codex_headers,
+    collect_codex_responses_text_and_usage,
+    convert_chat_completions_to_codex_responses,
+    iter_codex_responses_events,
+    load_codex_auth,
+    maybe_refresh_codex_auth,
+)
 from .config import settings
-from .openai_compat import ChatCompletionRequest, ErrorResponse, extract_image_urls, messages_to_prompt
+from .openai_compat import ChatCompletionRequest, ChatMessage, ErrorResponse, extract_image_urls, messages_to_prompt
 from .stream_json_cli import (
     TextAssembler,
     extract_claude_delta,
@@ -160,11 +168,13 @@ def _truncate_for_log(text: str) -> str:
 
 _AUTOMATION_GUARD = """SYSTEM: IMPORTANT (Open-AutoGLM action mode)
 - This is an Android UI automation loop. You will be given a screenshot each turn.
+- The screenshot is already attached as an image in the user's message; use it directly (native vision).
 - Output must be machine-parseable and contain exactly ONE action.
 - Follow the required format exactly:
   <think>short reason</think>
   <answer>do(...)</answer> OR <answer>finish(...)</answer>
 - The <answer> must contain ONLY the action expression (no extra text).
+- Do NOT call MCP/tools to fetch screenshots/resources (e.g., list_mcp_resources/read_mcp_resource); they are unavailable here.
 - Never refuse due to environment/sandbox/tool limitations; you are NOT executing actions yourself.
 - If you are uncertain or need confirmation, output: do(action="Wait", duration="1 seconds")
 - For WeChat message sending: only finish if the latest screenshot clearly shows the outgoing message bubble
@@ -198,6 +208,17 @@ def _maybe_inject_automation_guard(prompt: str) -> str:
     if "IMPORTANT (Open-AutoGLM action mode)" in prompt:
         return prompt
     return f"{_AUTOMATION_GUARD}\n\n{prompt}"
+
+
+def _maybe_inject_automation_guard_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
+    if not messages:
+        return messages
+    prompt = messages_to_prompt(messages)
+    if not _looks_like_automation_prompt(prompt):
+        return messages
+    if "IMPORTANT (Open-AutoGLM action mode)" in prompt:
+        return messages
+    return [ChatMessage(role="system", content=_AUTOMATION_GUARD), *messages]
 
 
 def _mime_to_ext(mime: str) -> str:
@@ -266,6 +287,23 @@ def _materialize_request_images(
     return tmpdir, paths
 
 
+@app.on_event("startup")
+async def _log_startup_config() -> None:
+    # Intentionally omit secrets (tokens, API keys).
+    logger.info(
+        "Gateway config: workspace=%s default_model=%s model_reasoning_effort=%s force_reasoning_effort=%s use_codex_responses_api=%s max_concurrency=%s sse_keepalive_seconds=%s strip_answer_tags=%s debug_log=%s",
+        settings.workspace,
+        settings.default_model,
+        settings.model_reasoning_effort,
+        settings.force_reasoning_effort,
+        settings.use_codex_responses_api,
+        settings.max_concurrency,
+        settings.sse_keepalive_seconds,
+        settings.strip_answer_tags,
+        settings.debug_log,
+    )
+
+
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
@@ -292,6 +330,36 @@ async def list_models(authorization: str | None = Header(default=None)):
     }
 
 
+@app.get("/debug/config")
+async def debug_config(authorization: str | None = Header(default=None)):
+    """
+    Return the effective runtime configuration (secrets redacted).
+
+    If `CODEX_GATEWAY_TOKEN` is set, this endpoint requires `Authorization: Bearer <token>`.
+    """
+    _check_auth(authorization)
+    return {
+        "default_model": settings.default_model,
+        "model_reasoning_effort": settings.model_reasoning_effort,
+        "force_reasoning_effort": settings.force_reasoning_effort,
+        "use_codex_responses_api": settings.use_codex_responses_api,
+        "codex_cli_home": settings.codex_cli_home,
+        "workspace": settings.workspace,
+        "max_concurrency": settings.max_concurrency,
+        "timeout_seconds": settings.timeout_seconds,
+        "subprocess_stream_limit": settings.subprocess_stream_limit,
+        "sse_keepalive_seconds": settings.sse_keepalive_seconds,
+        "strip_answer_tags": settings.strip_answer_tags,
+        "enable_image_input": settings.enable_image_input,
+        "max_image_count": settings.max_image_count,
+        "max_image_bytes": settings.max_image_bytes,
+        "disable_shell_tool": settings.disable_shell_tool,
+        "disable_view_image_tool": settings.disable_view_image_tool,
+        "debug_log": settings.debug_log,
+        "log_max_chars": settings.log_max_chars,
+    }
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     req: ChatCompletionRequest,
@@ -303,7 +371,27 @@ async def chat_completions(
     requested_model = req.model or settings.default_model
     resolved_model = settings.model_aliases.get(requested_model, requested_model)
     provider, provider_model = _parse_provider_model(resolved_model)
-    reasoning_effort = _extract_reasoning_effort(req) or settings.model_reasoning_effort
+    allowed_efforts = {"low", "medium", "high", "xhigh"}
+
+    def _normalize_effort(raw: str | None) -> str | None:
+        if raw is None:
+            return None
+        if raw == "none":
+            # Some clients send "none" to indicate minimal reasoning.
+            return "low"
+        return raw if raw in allowed_efforts else None
+    request_effort_raw = _extract_reasoning_effort(req)
+    request_effort = _normalize_effort(request_effort_raw)
+
+    forced_effort_raw = (settings.force_reasoning_effort or "").strip() or None
+    forced_effort = _normalize_effort(forced_effort_raw)
+
+    default_effort_raw = (settings.model_reasoning_effort or "").strip() or None
+    default_effort = _normalize_effort(default_effort_raw)
+
+    # Final effort is always normalized to a supported value.
+    reasoning_effort = forced_effort or request_effort or default_effort or "high"
+    # Some providers take a single prompt string; Codex backend uses structured messages.
     prompt = _maybe_inject_automation_guard(messages_to_prompt(req.messages))
     if len(prompt) > settings.max_prompt_chars:
         return _openai_error(f"Prompt too large ({len(prompt)} chars)", status_code=413)
@@ -311,45 +399,115 @@ async def chat_completions(
     created = int(time.time())
     resp_id = f"chatcmpl-{uuid.uuid4().hex}"
 
+    image_urls = extract_image_urls(req.messages)
+    use_codex_backend = bool(
+        provider == "codex"
+        and (
+            settings.use_codex_responses_api
+            or (settings.enable_image_input and image_urls)
+            # Prefer Codex backend `/responses` for streaming requests (true SSE deltas).
+            or req.stream
+        )
+    )
+
     sem = _get_semaphore()
     try:
+        effort_source = "default"
+        if forced_effort:
+            effort_source = "forced"
+        elif request_effort:
+            effort_source = "request"
+        elif not default_effort:
+            effort_source = "fallback"
         if settings.debug_log:
             logger.info(
-                "[%s] /v1/chat/completions model=%s resolved_model=%s provider=%s stream=%s effort=%s prompt_chars=%d",
+                "[%s] /v1/chat/completions model=%s resolved_model=%s provider=%s mode=%s stream=%s effort=%s prompt_chars=%d",
                 resp_id,
                 requested_model,
                 resolved_model,
                 provider,
+                ("codex-responses" if use_codex_backend else "cli"),
                 req.stream,
                 reasoning_effort,
                 len(prompt),
             )
+            logger.info(
+                "[%s] reasoning_effort source=%s forced=%s request=%s default=%s",
+                resp_id,
+                effort_source,
+                forced_effort_raw,
+                request_effort_raw,
+                default_effort_raw,
+            )
             logger.info("[%s] prompt:\n%s", resp_id, _truncate_for_log(prompt))
+        else:
+            logger.info(
+                "[%s] /v1/chat/completions model=%s resolved_model=%s provider=%s mode=%s stream=%s effort=%s effort_src=%s effort_req=%s effort_def=%s effort_forced=%s images=%d",
+                resp_id,
+                requested_model,
+                resolved_model,
+                provider,
+                ("codex-responses" if use_codex_backend else "cli"),
+                req.stream,
+                reasoning_effort,
+                effort_source,
+                request_effort_raw,
+                default_effort_raw,
+                forced_effort_raw,
+                len(image_urls),
+            )
 
         tmpdir: tempfile.TemporaryDirectory | None = None
         image_files: list[str] = []
         if provider == "codex":
-            try:
-                tmpdir, image_files = _materialize_request_images(req, resp_id=resp_id)
-            except HTTPException:
-                raise
-            except Exception as e:
-                return _openai_error(f"Failed to decode image input: {e}", status_code=400)
+            if use_codex_backend:
+                # No temp files needed; Codex backend accepts data: URLs directly.
+                if settings.debug_log and image_urls:
+                    for idx, url in enumerate(image_urls[-max(settings.max_image_count, 0) :]):
+                        try:
+                            data, ext = _decode_data_url(url)
+                            size = len(data)
+                        except Exception:
+                            ext, size = "bin", -1
+                        logger.info("[%s] image[%d] ext=%s bytes=%d", resp_id, idx, ext, size)
+                    logger.info("[%s] decoded_images=%d", resp_id, len(image_urls))
+            else:
+                try:
+                    tmpdir, image_files = _materialize_request_images(req, resp_id=resp_id)
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    return _openai_error(f"Failed to decode image input: {e}", status_code=400)
 
-            if settings.debug_log and image_files:
-                for idx, path in enumerate(image_files):
-                    try:
-                        size = os.path.getsize(path)
-                    except OSError:
-                        size = -1
-                    ext = os.path.splitext(path)[1].lstrip(".") or "bin"
-                    logger.info("[%s] image[%d] ext=%s bytes=%d", resp_id, idx, ext, size)
-                logger.info("[%s] decoded_images=%d", resp_id, len(image_files))
+                if settings.debug_log and image_files:
+                    for idx, path in enumerate(image_files):
+                        try:
+                            size = os.path.getsize(path)
+                        except OSError:
+                            size = -1
+                        ext = os.path.splitext(path)[1].lstrip(".") or "bin"
+                        logger.info("[%s] image[%d] ext=%s bytes=%d", resp_id, idx, ext, size)
+                    logger.info("[%s] decoded_images=%d", resp_id, len(image_files))
 
         def _evt_log(evt: dict) -> None:
             if not settings.debug_log:
                 return
             t = evt.get("type")
+            if t == "response.created":
+                resp = evt.get("response") or {}
+                rid = resp.get("id") if isinstance(resp, dict) else None
+                logger.info("[%s] codex %s response_id=%s", resp_id, t, rid)
+                return
+            if t == "response.completed":
+                resp = evt.get("response") or {}
+                usage = resp.get("usage") if isinstance(resp, dict) else None
+                extra = f" usage={usage}" if isinstance(usage, dict) else ""
+                logger.info("[%s] codex %s%s", resp_id, t, extra)
+                return
+            if t == "response.output_text.done":
+                text = evt.get("text") or ""
+                logger.info("[%s] codex %s chars=%d", resp_id, t, len(str(text)))
+                return
             if t == "thread.started":
                 logger.info("[%s] codex %s thread_id=%s", resp_id, t, evt.get("thread_id"))
                 return
@@ -447,6 +605,45 @@ async def chat_completions(
                         codex_model = provider_model or settings.default_model
 
                         async def _run_codex_once(model_id: str):
+                            if use_codex_backend:
+                                auth = load_codex_auth(codex_cli_home=settings.codex_cli_home)
+                                token = auth.api_key or auth.access_token
+                                if not token:
+                                    raise RuntimeError(
+                                        "Missing Codex auth token (run `codex login` to create ~/.codex/auth.json)."
+                                    )
+                                headers = build_codex_headers(
+                                    token=token,
+                                    account_id=auth.account_id,
+                                    version=settings.codex_responses_version,
+                                    user_agent=settings.codex_responses_user_agent,
+                                )
+                                backend_req = req.model_copy(
+                                    update={"model": model_id, "messages": _maybe_inject_automation_guard_messages(req.messages)}
+                                )
+                                payload = convert_chat_completions_to_codex_responses(
+                                    backend_req,
+                                    model_name=model_id,
+                                    force_stream=True,
+                                    reasoning_effort_override=(
+                                        "high" if reasoning_effort == "xhigh" else reasoning_effort
+                                    ),
+                                )
+                                events = iter_codex_responses_events(
+                                    base_url=settings.codex_responses_base_url,
+                                    headers=headers,
+                                    payload=payload,
+                                    timeout_seconds=settings.timeout_seconds,
+                                    event_callback=_evt_log if settings.debug_log else None,
+                                )
+                                text, usage = await collect_codex_responses_text_and_usage(events)
+                                # Re-wrap usage into the same shape as codex exec path.
+                                return type(
+                                    "BackendResult",
+                                    (),
+                                    {"text": text, "usage": usage},
+                                )()
+
                             events = iter_codex_events(
                                 prompt=prompt,
                                 model=model_id,
@@ -471,18 +668,26 @@ async def chat_completions(
                         try:
                             result = await _run_codex_once(codex_model)
                         except Exception as e:
-                            fallback_model = settings.default_model
-                            if codex_model != fallback_model and _looks_like_unsupported_model_error(str(e)):
-                                if settings.debug_log:
-                                    logger.warning(
-                                        "[%s] codex model unsupported: %s -> fallback=%s",
-                                        resp_id,
-                                        codex_model,
-                                        fallback_model,
-                                    )
-                                result = await _run_codex_once(fallback_model)
+                            # If Codex backend auth expired, refresh and retry once before model fallback.
+                            if use_codex_backend and ("codex responses failed: 401" in str(e) or "codex responses failed: 403" in str(e)):
+                                await maybe_refresh_codex_auth(
+                                    codex_cli_home=settings.codex_cli_home,
+                                    timeout_seconds=min(settings.timeout_seconds, 30),
+                                )
+                                result = await _run_codex_once(codex_model)
                             else:
-                                raise
+                                fallback_model = settings.default_model
+                                if codex_model != fallback_model and _looks_like_unsupported_model_error(str(e)):
+                                    if settings.debug_log:
+                                        logger.warning(
+                                            "[%s] codex model unsupported: %s -> fallback=%s",
+                                            resp_id,
+                                            codex_model,
+                                            fallback_model,
+                                        )
+                                    result = await _run_codex_once(fallback_model)
+                                else:
+                                    raise
                         text = result.text
                         usage = result.usage
                     elif provider == "cursor-agent":
@@ -626,25 +831,68 @@ async def chat_completions(
                     for attempt_idx, attempt_model in enumerate(attempt_models):
                         if provider == "codex":
                             codex_model = attempt_model or settings.default_model
-                            events = iter_codex_events(
-                                prompt=prompt,
-                                model=codex_model,
-                                cd=settings.workspace,
-                                images=image_files,
-                                disable_shell_tool=settings.disable_shell_tool,
-                                disable_view_image_tool=settings.disable_view_image_tool,
-                                sandbox=settings.sandbox,
-                                skip_git_repo_check=settings.skip_git_repo_check,
-                                model_reasoning_effort=reasoning_effort,
-                                approval_policy=settings.approval_policy,
-                                enable_search=settings.enable_search,
-                                add_dirs=settings.add_dirs,
-                                codex_cli_home=settings.codex_cli_home,
-                                timeout_seconds=settings.timeout_seconds,
-                                stream_limit=settings.subprocess_stream_limit,
-                                event_callback=_evt_log,
-                                stderr_callback=_stderr_log,
-                            )
+                            if use_codex_backend:
+                                auth = load_codex_auth(codex_cli_home=settings.codex_cli_home)
+                                token = auth.api_key or auth.access_token
+                                if not token:
+                                    # Best-effort refresh (e.g. first-time login) before failing.
+                                    await maybe_refresh_codex_auth(
+                                        codex_cli_home=settings.codex_cli_home,
+                                        timeout_seconds=min(settings.timeout_seconds, 30),
+                                    )
+                                    auth = load_codex_auth(codex_cli_home=settings.codex_cli_home)
+                                    token = auth.api_key or auth.access_token
+                                if not token:
+                                    raise RuntimeError(
+                                        "Missing Codex auth token (run `codex login` to create ~/.codex/auth.json)."
+                                    )
+                                headers = build_codex_headers(
+                                    token=token,
+                                    account_id=auth.account_id,
+                                    version=settings.codex_responses_version,
+                                    user_agent=settings.codex_responses_user_agent,
+                                )
+                                backend_req = req.model_copy(
+                                    update={
+                                        "model": codex_model,
+                                        "messages": _maybe_inject_automation_guard_messages(req.messages),
+                                    }
+                                )
+                                payload = convert_chat_completions_to_codex_responses(
+                                    backend_req,
+                                    model_name=codex_model,
+                                    force_stream=True,
+                                    reasoning_effort_override=(
+                                        "high" if reasoning_effort == "xhigh" else reasoning_effort
+                                    ),
+                                )
+                                events = iter_codex_responses_events(
+                                    base_url=settings.codex_responses_base_url,
+                                    headers=headers,
+                                    payload=payload,
+                                    timeout_seconds=settings.timeout_seconds,
+                                    event_callback=_evt_log if settings.debug_log else None,
+                                )
+                            else:
+                                events = iter_codex_events(
+                                    prompt=prompt,
+                                    model=codex_model,
+                                    cd=settings.workspace,
+                                    images=image_files,
+                                    disable_shell_tool=settings.disable_shell_tool,
+                                    disable_view_image_tool=settings.disable_view_image_tool,
+                                    sandbox=settings.sandbox,
+                                    skip_git_repo_check=settings.skip_git_repo_check,
+                                    model_reasoning_effort=reasoning_effort,
+                                    approval_policy=settings.approval_policy,
+                                    enable_search=settings.enable_search,
+                                    add_dirs=settings.add_dirs,
+                                    codex_cli_home=settings.codex_cli_home,
+                                    timeout_seconds=settings.timeout_seconds,
+                                    stream_limit=settings.subprocess_stream_limit,
+                                    event_callback=_evt_log,
+                                    stderr_callback=_stderr_log,
+                                )
                         elif provider == "cursor-agent":
                             cursor_model = provider_model or settings.cursor_agent_model
                             cmd = [
@@ -779,10 +1027,26 @@ async def chat_completions(
 
                                 delta = ""
                                 if provider == "codex":
-                                    if evt.get("type") == "item.completed":
-                                        item = evt.get("item") or {}
-                                        if item.get("type") == "agent_message":
-                                            delta = _maybe_strip_answer_tags(str(item.get("text") or ""))
+                                    if use_codex_backend:
+                                        if evt.get("type") == "response.output_text.delta" and isinstance(
+                                            evt.get("delta"), str
+                                        ):
+                                            delta = _maybe_strip_answer_tags(evt["delta"])
+                                        # Some short responses arrive only as a final "done" event.
+                                        if (
+                                            not delta
+                                            and not sent_content
+                                            and evt.get("type") == "response.output_text.done"
+                                            and isinstance(evt.get("text"), str)
+                                        ):
+                                            delta = _maybe_strip_answer_tags(evt["text"])
+                                        if evt.get("type") == "response.completed":
+                                            break
+                                    else:
+                                        if evt.get("type") == "item.completed":
+                                            item = evt.get("item") or {}
+                                            if item.get("type") == "agent_message":
+                                                delta = _maybe_strip_answer_tags(str(item.get("text") or ""))
                                 elif provider == "cursor-agent":
                                     delta = _maybe_strip_answer_tags(extract_cursor_agent_delta(evt, assembler))
                                 elif provider == "claude":

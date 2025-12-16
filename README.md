@@ -7,7 +7,7 @@ Works great as a local gateway (localhost) or behind a reverse proxy.
 Think of it as **LiteLLM for agent CLIs**: you point existing OpenAI SDKs/tools at `base_url`, and choose a backend by `model`.
 
 Supported backends:
-- OpenAI Codex CLI (`codex exec`)
+- OpenAI Codex (defaults to backend `/responses` for vision; falls back to `codex exec`)
 - Cursor Agent CLI (`cursor-agent`)
 - Claude Code CLI (`claude`)
 - Gemini CLI (`gemini`)
@@ -47,6 +47,15 @@ By default it only binds to localhost (`127.0.0.1`) and uses `--sandbox read-onl
 cp .env.example .env
 ./scripts/serve.sh
 ```
+
+### With the `agent-cli-to-api` CLI
+
+```bash
+cp .env.example .env
+uv run agent-cli-to-api
+```
+
+By default it auto-loads `.env` from the current directory, or falls back to the `codex-api/.env` next to the installed package (and prints which one it loaded).
 
 ### With `uvx` (no venv, no clone)
 
@@ -95,6 +104,7 @@ Keep `CODEX_GATEWAY_TOKEN` enabled, and consider Cloudflare Access / IP allowlis
 ## API
 
 - `GET /healthz`
+- `GET /debug/config` (effective runtime config; requires auth if `CODEX_GATEWAY_TOKEN` is set)
 - `GET /v1/models`
 - `POST /v1/chat/completions` (supports `stream`)
 
@@ -192,10 +202,16 @@ console.log(resp.choices[0].message.content);
 - `CODEX_WORKSPACE`: directory passed to `codex exec --cd`
 - `CODEX_CLI_HOME`: override HOME for the `codex` subprocess (default: `./.codex-gateway-home`)
 - `CODEX_USE_SYSTEM_CODEX_HOME`: `1/0` (default: `0`) use your normal `~/.codex` config instead of the gateway home
+- `CODEX_USE_CODEX_RESPONSES_API`: `1/0` (default: `0`) use the Codex backend `/responses` API for all Codex requests (vision requests auto-use it)
+  - Note: `/responses` mode sets `tool_choice=none` (no MCP/tools); use `codex exec` for tool-driven coding tasks.
+- `CODEX_CODEX_BASE_URL`: Codex backend base URL (default: `https://chatgpt.com/backend-api/codex`)
+- `CODEX_CODEX_VERSION`: Codex backend `Version` header (default: `0.21.0`)
+- `CODEX_CODEX_USER_AGENT`: Codex backend `User-Agent` header (default: `codex_cli_rs/...`)
 - `CODEX_MODEL`: default model id (default: `gpt-5-codex`)
 - `CODEX_MODEL_ALIASES`: JSON map of request model -> real model (e.g. `{"autoglm-phone":"gpt-5.2"}`)
 - `CODEX_ADVERTISED_MODELS`: comma-separated list for `GET /v1/models` (defaults to `CODEX_MODEL`)
-- `CODEX_MODEL_REASONING_EFFORT`: `low|medium|high|xhigh` (default: `high`)
+- `CODEX_MODEL_REASONING_EFFORT`: `low|medium|high|xhigh` (default: `low`)
+- `CODEX_FORCE_REASONING_EFFORT`: if set, overrides any request-provided effort (e.g. force `low` for automation)
 - `CODEX_SANDBOX`: `read-only` | `workspace-write` | `danger-full-access` (default: `read-only`)
 - `CODEX_APPROVAL_POLICY`: `untrusted|on-failure|on-request|never` (default: `never`)
 - `CODEX_DISABLE_SHELL_TOOL`: `1/0` (default: `1`) disable Codex shell tool so responses stay "model-like" and avoid surprise command executions

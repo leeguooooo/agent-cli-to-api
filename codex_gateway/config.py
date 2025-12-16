@@ -86,11 +86,13 @@ class Settings:
     )
 
     # Codex CLI options.
-    default_model: str = os.environ.get("CODEX_MODEL", "gpt-5-codex")
+    default_model: str = os.environ.get("CODEX_MODEL", "gpt-5.1")
     # Some local Codex configs default to xhigh, which is not accepted by all models.
     model_reasoning_effort: str | None = (
-        _env_str("CODEX_MODEL_REASONING_EFFORT", "high").strip() or None
+        _env_str("CODEX_MODEL_REASONING_EFFORT", "low").strip() or None
     )
+    # If set, overrides any request-provided reasoning effort.
+    force_reasoning_effort: str | None = (_env_str("CODEX_FORCE_REASONING_EFFORT", "").strip() or None)
     sandbox: SandboxMode = os.environ.get("CODEX_SANDBOX", "read-only")  # type: ignore[assignment]
     approval_policy: ApprovalPolicy = os.environ.get("CODEX_APPROVAL_POLICY", "never")  # type: ignore[assignment]
     skip_git_repo_check: bool = _env_bool("CODEX_SKIP_GIT_REPO_CHECK", True)
@@ -101,6 +103,19 @@ class Settings:
     disable_shell_tool: bool = _env_bool("CODEX_DISABLE_SHELL_TOOL", True)
     # Avoid Codex preferring the MCP-based image tool over native vision input.
     disable_view_image_tool: bool = _env_bool("CODEX_DISABLE_VIEW_IMAGE_TOOL", True)
+
+    # Use Codex backend `/responses` API (like Codex CLI) instead of `codex exec`.
+    # This avoids MCP/tool-call flakiness and provides true token streaming.
+    use_codex_responses_api: bool = _env_bool("CODEX_USE_CODEX_RESPONSES_API", False)
+    codex_responses_base_url: str = _env_str(
+        "CODEX_CODEX_BASE_URL",
+        "https://chatgpt.com/backend-api/codex",
+    )
+    codex_responses_version: str = _env_str("CODEX_CODEX_VERSION", "0.21.0")
+    codex_responses_user_agent: str = _env_str(
+        "CODEX_CODEX_USER_AGENT",
+        "codex_cli_rs/0.50.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
+    )
 
     # Optional other agent CLIs (multi-provider).
     cursor_agent_bin: str = os.environ.get("CURSOR_AGENT_BIN", "cursor-agent")
