@@ -220,7 +220,7 @@ Supported presets:
 - `gemini-cloudcode`
 
 - `CODEX_NO_DOTENV`: `1/0` (default: `0`) disable auto-loading `.env` when running `uvicorn main:app`
-- `CODEX_WORKSPACE`: directory passed to `codex exec --cd`
+- `CODEX_WORKSPACE`: workspace directory for CLI providers (default: an empty temp dir under `/tmp`; set this when you want the agent to read/edit a real repo)
 - `CODEX_CLI_HOME`: override HOME for the `codex` subprocess (default: `./.codex-gateway-home`)
 - `CODEX_USE_SYSTEM_CODEX_HOME`: `1/0` (default: `0`) use your normal `~/.codex` config instead of the gateway home
 - `CODEX_USE_CODEX_RESPONSES_API`: `1/0` (default: `0`) use the Codex backend `/responses` API for all Codex requests (vision requests auto-use it)

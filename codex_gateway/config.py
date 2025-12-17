@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -225,6 +226,24 @@ def _apply_preset_env() -> None:
 _apply_preset_env()
 
 
+def _default_tmp_root() -> str:
+    # Prefer /tmp for predictability (many tools and docs assume it), fall back to the
+    # platform temp dir when /tmp is unavailable.
+    for candidate in (os.environ.get("CODEX_TMP_ROOT") or "", "/tmp"):
+        p = candidate.strip()
+        if p and Path(p).is_dir():
+            return p
+    return tempfile.gettempdir()
+
+
+def _resolve_workspace() -> str:
+    raw = (os.environ.get("CODEX_WORKSPACE") or "").strip()
+    if raw:
+        return os.path.abspath(os.path.expanduser(raw))
+    # Default to an empty temp workspace so users don't need to configure CODEX_WORKSPACE.
+    return tempfile.mkdtemp(prefix="agent-cli-to-api-workspace-", dir=_default_tmp_root())
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -288,7 +307,7 @@ class Settings:
     bearer_token: str | None = os.environ.get("CODEX_GATEWAY_TOKEN")
 
     # Working directory for `codex exec --cd ...`.
-    workspace: str = os.environ.get("CODEX_WORKSPACE", os.getcwd())
+    workspace: str = _resolve_workspace()
 
     # Optional HOME override for the Codex CLI subprocess. Use this to point at a minimal
     # `~/.codex/config.toml` (e.g. without MCP servers) for much lower latency.
