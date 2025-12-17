@@ -116,16 +116,9 @@ def main(argv: list[str] | None = None) -> None:
         # Default: do not load any .env implicitly.
         os.environ.setdefault("CODEX_NO_DOTENV", "1")
 
-    provider_raw = (args.provider or "").strip().lower()
-    if provider_raw == "doctor":
-        import asyncio
-
-        from .doctor import run_doctor
-
-        raise SystemExit(asyncio.run(run_doctor()))
-
     normalized_provider = _normalize_provider(args.provider)
-    if args.provider and not normalized_provider:
+    provider_raw = (args.provider or "").strip().lower()
+    if args.provider and not normalized_provider and provider_raw != "doctor":
         raise SystemExit(f"Unknown provider: {args.provider}")
 
     if normalized_provider:
@@ -148,6 +141,16 @@ def main(argv: list[str] | None = None) -> None:
             creds = Path(os.environ.get("CLAUDE_OAUTH_CREDS_PATH", "~/.claude/oauth_creds.json")).expanduser()
             if creds.exists():
                 os.environ.setdefault("CODEX_PRESET", "claude-oauth")
+
+    if provider_raw == "doctor":
+        import asyncio
+
+        # Import config so presets are applied the same way as in the server process.
+        # This makes doctor reflect the effective configuration users will run with.
+        from . import config as _config  # noqa: F401
+        from .doctor import run_doctor
+
+        raise SystemExit(asyncio.run(run_doctor()))
 
     uvicorn.run(
         "codex_gateway.server:app",

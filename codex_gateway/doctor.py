@@ -12,15 +12,22 @@ from .codex_responses import load_codex_auth
 from .gemini_cloudcode import load_gemini_creds
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    v = (os.environ.get(name) or "").strip().lower()
+def _parse_env_bool(name: str, default: bool = False) -> tuple[bool, str | None]:
+    """
+    Parse a boolean env var.
+    Returns (value, error). On invalid values, returns (default, <error message>).
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default, None
+    v = raw.strip().lower()
     if not v:
-        return default
+        return default, None
     if v in {"1", "true", "yes", "y", "on"}:
-        return True
+        return True, None
     if v in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
+        return False, None
+    return default, f"invalid boolean value {raw!r} (expected one of 1/0 true/false yes/no on/off)"
 
 
 def _normalize_provider(raw: str | None) -> str:
@@ -110,9 +117,13 @@ def _check_workspace_file(*, required: bool) -> CheckResult:
 
 
 async def run_doctor() -> int:
+    # Import config so presets are applied, mirroring the server.
+    # This keeps doctor output aligned with what the gateway will actually do.
+    from . import config as _config  # noqa: F401
+
     provider = _normalize_provider(os.environ.get("CODEX_PROVIDER"))
-    claude_use_oauth = _env_bool("CLAUDE_USE_OAUTH_API", False)
-    gemini_use_cloudcode = _env_bool("GEMINI_USE_CLOUDCODE_API", False)
+    claude_use_oauth, claude_use_oauth_err = _parse_env_bool("CLAUDE_USE_OAUTH_API", False)
+    gemini_use_cloudcode, gemini_use_cloudcode_err = _parse_env_bool("GEMINI_USE_CLOUDCODE_API", False)
 
     # Provider readiness heuristics:
     # - codex requires binary + auth
@@ -137,11 +148,18 @@ async def run_doctor() -> int:
 
     checks: list[CheckResult] = []
 
+    # Surface invalid boolean env values explicitly (avoid silent fallback).
+    if claude_use_oauth_err:
+        checks.append(CheckResult("CLAUDE_USE_OAUTH_API", False, False, claude_use_oauth_err))
+    if gemini_use_cloudcode_err:
+        checks.append(CheckResult("GEMINI_USE_CLOUDCODE_API", False, False, gemini_use_cloudcode_err))
+
     if provider == "codex":
         checks.extend([codex_bin, codex_auth])
     elif provider == "gemini":
         checks.append(gemini_bin)
-        checks.append(gemini_creds if gemini_use_cloudcode else _check_gemini_creds(required=False))
+        if gemini_use_cloudcode:
+            checks.append(gemini_creds)
     elif provider == "claude":
         if claude_use_oauth:
             checks.append(claude_oauth)
@@ -200,4 +218,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main(sys.argv[1:])
-

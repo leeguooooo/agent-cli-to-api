@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import shutil
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
 from .config import settings
@@ -25,40 +27,47 @@ class GeminiOAuthCreds:
     project_id: str | None
 
 
-_OAUTH_CLIENT_ID_RE = re.compile(rb"[0-9]{6,}-[a-z0-9]{10,}\.apps\.googleusercontent\.com")
-_OAUTH_CLIENT_SECRET_RE = re.compile(rb"GOCSPX-[A-Za-z0-9_-]{10,}")
 _CACHED_OAUTH_CLIENT: tuple[str, str] | None = None
+_ACCESS_TOKEN_LOCK = None
+_CACHED_ACCESS_TOKEN: str | None = None
+_CACHED_ACCESS_TOKEN_EXPIRY_MS: int | None = None
+_PROJECT_ID_LOCK = None
+_CACHED_PROJECT_ID: str | None = None
+
+_OAUTH_CLIENT_ID_LITERAL_RE = re.compile(r"\\bOAUTH_CLIENT_ID\\b\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]")
+_OAUTH_CLIENT_SECRET_LITERAL_RE = re.compile(r"\\bOAUTH_CLIENT_SECRET\\b\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]")
 
 
-def _scan_bytes_for_oauth_client(data: bytes) -> tuple[str | None, str | None]:
-    cid = None
-    sec = None
-    m1 = _OAUTH_CLIENT_ID_RE.search(data)
-    if m1:
-        cid = m1.group(0).decode("ascii", errors="ignore")
-    m2 = _OAUTH_CLIENT_SECRET_RE.search(data)
-    if m2:
-        sec = m2.group(0).decode("ascii", errors="ignore")
-    return cid, sec
+def _ensure_locks() -> None:
+    global _ACCESS_TOKEN_LOCK, _PROJECT_ID_LOCK
+    if _ACCESS_TOKEN_LOCK is None or _PROJECT_ID_LOCK is None:
+        import asyncio
+
+        _ACCESS_TOKEN_LOCK = asyncio.Lock()
+        _PROJECT_ID_LOCK = asyncio.Lock()
 
 
-def _scan_file_for_oauth_client(path: Path) -> tuple[str | None, str | None]:
+def _read_oauth_client_from_oauth2_js(path: Path) -> tuple[str | None, str | None]:
     try:
-        data = path.read_bytes()
+        text = path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return None, None
-    return _scan_bytes_for_oauth_client(data)
+    m1 = _OAUTH_CLIENT_ID_LITERAL_RE.search(text)
+    m2 = _OAUTH_CLIENT_SECRET_LITERAL_RE.search(text)
+    cid = m1.group(1).strip() if m1 else None
+    sec = m2.group(1).strip() if m2 else None
+    return (cid or None), (sec or None)
 
 
-def _scan_gemini_install_for_oauth_client(entrypoint: Path) -> tuple[str | None, str | None]:
+def _resolve_gemini_oauth2_js_path() -> Path | None:
     """
-    Try to find the Gemini CLI OAuth client id/secret from the installed gemini-cli package.
-    Homebrew layout example:
-      .../Cellar/gemini-cli/<ver>/libexec/lib/node_modules/@google/gemini-cli-core/.../oauth2.js
+    Best-effort locate Gemini CLI's `oauth2.js` without an unbounded filesystem scan.
+    This file contains the public OAuth client id/secret used by the Gemini CLI.
     """
-    entrypoint = entrypoint.resolve()
+    bin_path = shutil.which(settings.gemini_bin) or settings.gemini_bin
+    entrypoint = Path(bin_path).expanduser().resolve()
+
     roots: list[Path] = []
-    # Prefer a Homebrew-style package root that contains both `bin/` and `libexec/`.
     for parent in [entrypoint.parent, *entrypoint.parents]:
         if (parent / "bin").exists() and (parent / "libexec").exists():
             roots.append(parent)
@@ -78,31 +87,8 @@ def _scan_gemini_install_for_oauth_client(entrypoint: Path) -> tuple[str | None,
 
     for c in candidates:
         if c.exists() and c.is_file():
-            cid, sec = _scan_file_for_oauth_client(c)
-            if cid and sec:
-                return cid, sec
-
-    # Fallback: shallow search under likely package roots (bounded).
-    for root in roots:
-        pkg_root = root / "libexec/lib/node_modules"
-        if not pkg_root.exists():
-            pkg_root = root / "lib/node_modules"
-        if not pkg_root.exists():
-            continue
-        scanned = 0
-        try:
-            for p in pkg_root.rglob("oauth2.js"):
-                scanned += 1
-                if scanned > 2000:
-                    break
-                if p.is_file():
-                    cid, sec = _scan_file_for_oauth_client(p)
-                    if cid and sec:
-                        return cid, sec
-        except Exception:
-            continue
-
-    return None, None
+            return c
+    return None
 
 
 def resolve_gemini_oauth_client() -> tuple[str, str]:
@@ -110,7 +96,7 @@ def resolve_gemini_oauth_client() -> tuple[str, str]:
     Resolve the OAuth client id/secret used to refresh Gemini CLI tokens.
     Priority:
       1) env `GEMINI_OAUTH_CLIENT_ID` / `GEMINI_OAUTH_CLIENT_SECRET`
-      2) auto-detect by scanning the installed `gemini` CLI binary
+      2) built-in defaults (matches Gemini CLI as of 0.19.x)
     """
     global _CACHED_OAUTH_CLIENT
     if _CACHED_OAUTH_CLIENT:
@@ -119,27 +105,55 @@ def resolve_gemini_oauth_client() -> tuple[str, str]:
     if settings.gemini_oauth_client_id and settings.gemini_oauth_client_secret:
         _CACHED_OAUTH_CLIENT = (settings.gemini_oauth_client_id, settings.gemini_oauth_client_secret)
         return _CACHED_OAUTH_CLIENT
-
-    bin_path = shutil.which(settings.gemini_bin) or settings.gemini_bin
-    try:
-        p = Path(bin_path)
-        if not p.exists():
-            raise FileNotFoundError(bin_path)
-        found_id, found_secret = _scan_gemini_install_for_oauth_client(p)
-    except Exception as e:
+    if settings.gemini_oauth_client_id or settings.gemini_oauth_client_secret:
         raise RuntimeError(
-            "Gemini OAuth client credentials are missing and auto-detection failed. "
-            "Set GEMINI_OAUTH_CLIENT_ID / GEMINI_OAUTH_CLIENT_SECRET."
-        ) from e
-
-    if not found_id or not found_secret:
-        raise RuntimeError(
-            "Gemini OAuth client credentials are missing and could not be detected from `gemini` binary. "
-            "Set GEMINI_OAUTH_CLIENT_ID / GEMINI_OAUTH_CLIENT_SECRET."
+            "Gemini OAuth client credentials are partially configured. "
+            "Set both GEMINI_OAUTH_CLIENT_ID and GEMINI_OAUTH_CLIENT_SECRET, or unset both."
         )
+    oauth2_js = _resolve_gemini_oauth2_js_path()
+    if oauth2_js:
+        cid, sec = _read_oauth_client_from_oauth2_js(oauth2_js)
+        if cid and sec:
+            _CACHED_OAUTH_CLIENT = (cid, sec)
+            return _CACHED_OAUTH_CLIENT
 
-    _CACHED_OAUTH_CLIENT = (found_id, found_secret)
-    return _CACHED_OAUTH_CLIENT
+    raise RuntimeError(
+        "Gemini OAuth client credentials are missing. "
+        "Set GEMINI_OAUTH_CLIENT_ID / GEMINI_OAUTH_CLIENT_SECRET."
+    )
+
+
+def _secure_write_json(path: Path, obj: dict[str, Any]) -> None:
+    """
+    Best-effort safe write:
+    - atomic replace
+    - 0600 file permissions (tokens may be present)
+    """
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except Exception:
+        pass
+
+    data = json.dumps(obj, ensure_ascii=False, indent=2) + "\n"
+    with NamedTemporaryFile("w", encoding="utf-8", dir=str(path.parent), delete=False) as f:
+        tmp = Path(f.name)
+        try:
+            os.chmod(tmp, 0o600)
+        except Exception:
+            pass
+        f.write(data)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except Exception:
+            pass
+    os.replace(tmp, path)
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
 
 
 def _load_oauth_creds(path: str) -> GeminiOAuthCreds:
@@ -212,47 +226,63 @@ async def _refresh_access_token(
 
 
 async def get_gemini_access_token(*, timeout_seconds: int) -> str:
-    creds_path = settings.gemini_oauth_creds_path
-    creds = _load_oauth_creds(creds_path)
-    if creds.access_token and not _is_expired(creds.expiry_date_ms):
-        return creds.access_token
-    if not creds.refresh_token:
-        raise RuntimeError(
-            f"Gemini OAuth refresh_token missing. Ensure Gemini CLI is logged in and `{creds_path}` exists."
-        )
+    global _CACHED_ACCESS_TOKEN, _CACHED_ACCESS_TOKEN_EXPIRY_MS
+    _ensure_locks()
+    # Fast path: process cache.
+    if _CACHED_ACCESS_TOKEN and not _is_expired(_CACHED_ACCESS_TOKEN_EXPIRY_MS):
+        return _CACHED_ACCESS_TOKEN
 
-    token_resp = await _refresh_access_token(refresh_token=creds.refresh_token, timeout_seconds=timeout_seconds)
-    access = token_resp.get("access_token")
-    expires_in = token_resp.get("expires_in")
-    if not isinstance(access, str) or not access.strip():
-        raise RuntimeError("Gemini OAuth refresh failed: missing access_token")
+    # Serialize refresh to avoid hammering OAuth when multiple requests arrive concurrently.
+    async with _ACCESS_TOKEN_LOCK:  # type: ignore[arg-type]
+        if _CACHED_ACCESS_TOKEN and not _is_expired(_CACHED_ACCESS_TOKEN_EXPIRY_MS):
+            return _CACHED_ACCESS_TOKEN
 
-    expiry_ms = None
-    if isinstance(expires_in, (int, float)):
-        expiry_ms = int(time.time() * 1000) + int(expires_in) * 1000
+        creds_path = settings.gemini_oauth_creds_path
+        creds = _load_oauth_creds(creds_path)
+        if creds.access_token and not _is_expired(creds.expiry_date_ms):
+            _CACHED_ACCESS_TOKEN = creds.access_token
+            _CACHED_ACCESS_TOKEN_EXPIRY_MS = creds.expiry_date_ms
+            return _CACHED_ACCESS_TOKEN
+        if not creds.refresh_token:
+            raise RuntimeError(
+                f"Gemini OAuth refresh_token missing. Ensure Gemini CLI is logged in and `{creds_path}` exists."
+            )
 
-    # Best-effort persist back to the Gemini CLI creds file (no secrets logged).
-    p = Path(creds_path).expanduser()
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raw = {}
-    except Exception:
-        raw = {}
-    raw["access_token"] = access.strip()
-    if expiry_ms is not None:
-        raw["expiry_date"] = expiry_ms
-    # Keep existing refresh_token / scope / token_type / id_token.
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    except Exception:
-        pass
+        token_resp = await _refresh_access_token(refresh_token=creds.refresh_token, timeout_seconds=timeout_seconds)
+        access = token_resp.get("access_token")
+        expires_in = token_resp.get("expires_in")
+        if not isinstance(access, str) or not access.strip():
+            raise RuntimeError("Gemini OAuth refresh failed: missing access_token")
 
-    return access.strip()
+        expiry_ms = None
+        if isinstance(expires_in, (int, float)):
+            expiry_ms = int(time.time() * 1000) + int(expires_in) * 1000
+
+        _CACHED_ACCESS_TOKEN = access.strip()
+        _CACHED_ACCESS_TOKEN_EXPIRY_MS = expiry_ms
+
+        # Optional: persist back to the Gemini CLI creds file (disabled by default).
+        if os.environ.get("GEMINI_CLOUDCODE_PERSIST_CACHE"):
+            p = Path(creds_path).expanduser()
+            try:
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    raw = {}
+            except Exception:
+                raw = {}
+            raw["access_token"] = _CACHED_ACCESS_TOKEN
+            if expiry_ms is not None:
+                raw["expiry_date"] = expiry_ms
+            try:
+                _secure_write_json(p, raw)
+            except Exception:
+                pass
+
+        return _CACHED_ACCESS_TOKEN
 
 
 async def resolve_gemini_project_id(*, access_token: str, timeout_seconds: int) -> str:
+    global _CACHED_PROJECT_ID
     """
     Cloud Code Assist requires a valid GCP project id.
     Priority:
@@ -263,53 +293,64 @@ async def resolve_gemini_project_id(*, access_token: str, timeout_seconds: int) 
     if settings.gemini_project_id:
         return settings.gemini_project_id
 
-    creds_path = settings.gemini_oauth_creds_path
-    creds = _load_oauth_creds(creds_path)
-    if creds.project_id:
-        return creds.project_id
+    _ensure_locks()
+    if _CACHED_PROJECT_ID:
+        return _CACHED_PROJECT_ID
 
-    url = "https://cloudresourcemanager.googleapis.com/v1/projects?pageSize=10"
-    headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
-    client = await get_async_client("gemini-cloudresourcemanager")
-    resp = await request_json_with_retries(
-        client=client,
-        method="GET",
-        url=url,
-        timeout_s=timeout_seconds,
-        headers=headers,
-    )
-    resp.raise_for_status()
-    obj = resp.json()
-    project_id: str | None = None
-    if isinstance(obj, dict) and isinstance(obj.get("projects"), list):
-        for item in obj["projects"]:
-            if not isinstance(item, dict):
-                continue
-            if item.get("lifecycleState") != "ACTIVE":
-                continue
-            pid = item.get("projectId")
-            if isinstance(pid, str) and pid.strip():
-                project_id = pid.strip()
-                break
-    if not project_id:
-        raise RuntimeError("gemini cloudcode: could not resolve a valid GCP project_id; set GEMINI_PROJECT_ID")
+    async with _PROJECT_ID_LOCK:  # type: ignore[arg-type]
+        if _CACHED_PROJECT_ID:
+            return _CACHED_PROJECT_ID
 
-    # Best-effort cache into the creds file for faster future startups.
-    p = Path(creds_path).expanduser()
-    try:
-        raw = json.loads(p.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raw = {}
-    except Exception:
-        raw = {}
-    raw["project_id"] = project_id
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    except Exception:
-        pass
+        creds_path = settings.gemini_oauth_creds_path
+        creds = _load_oauth_creds(creds_path)
+        if creds.project_id:
+            _CACHED_PROJECT_ID = creds.project_id
+            return _CACHED_PROJECT_ID
 
-    return project_id
+        url = "https://cloudresourcemanager.googleapis.com/v1/projects?pageSize=10"
+        headers = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+        client = await get_async_client("gemini-cloudresourcemanager")
+        resp = await request_json_with_retries(
+            client=client,
+            method="GET",
+            url=url,
+            timeout_s=timeout_seconds,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        obj = resp.json()
+        project_id: str | None = None
+        if isinstance(obj, dict) and isinstance(obj.get("projects"), list):
+            for item in obj["projects"]:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("lifecycleState") != "ACTIVE":
+                    continue
+                pid = item.get("projectId")
+                if isinstance(pid, str) and pid.strip():
+                    project_id = pid.strip()
+                    break
+        if not project_id:
+            raise RuntimeError("gemini cloudcode: could not resolve a valid GCP project_id; set GEMINI_PROJECT_ID")
+
+        _CACHED_PROJECT_ID = project_id
+
+        # Optional: persist for faster future startups (disabled by default).
+        if os.environ.get("GEMINI_CLOUDCODE_PERSIST_CACHE"):
+            p = Path(creds_path).expanduser()
+            try:
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
+                    raw = {}
+            except Exception:
+                raw = {}
+            raw["project_id"] = project_id
+            try:
+                _secure_write_json(p, raw)
+            except Exception:
+                pass
+
+        return _CACHED_PROJECT_ID
 
 
 def _content_parts(content: Any) -> list[dict[str, Any]]:
