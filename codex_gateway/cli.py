@@ -5,6 +5,19 @@ from pathlib import Path
 import uvicorn
 
 
+def _normalize_provider(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    v = raw.strip().lower()
+    if not v:
+        return None
+    if v in {"auto", "codex", "claude", "gemini"}:
+        return v
+    if v in {"cursor-agent", "cursor_agent", "cursoragent", "cursor"}:
+        return "cursor-agent"
+    return None
+
+
 def _maybe_load_dotenv(path: Path) -> None:
     if not path.exists() or not path.is_file():
         return
@@ -43,6 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-cli-to-api",
         description="Expose agent CLIs as an OpenAI-compatible /v1 API gateway.",
+    )
+    parser.add_argument(
+        "provider",
+        nargs="?",
+        default=None,
+        help="Provider to use: codex|gemini|claude|cursor-agent (default: auto).",
     )
     parser.add_argument(
         "--host",
@@ -87,6 +106,10 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    normalized_provider = _normalize_provider(args.provider)
+    if args.provider and not normalized_provider:
+        raise SystemExit(f"Unknown provider: {args.provider}")
+
     if args.env_file:
         path = Path(args.env_file)
         _maybe_load_dotenv(path)
@@ -102,8 +125,26 @@ def main(argv: list[str] | None = None) -> None:
         if not loaded:
             print("[agent-cli-to-api] no .env found; using process environment")
 
+    if normalized_provider:
+        os.environ["CODEX_PROVIDER"] = normalized_provider
+
     if args.preset:
         os.environ["CODEX_PRESET"] = str(args.preset)
+    elif normalized_provider and not os.environ.get("CODEX_PRESET"):
+        # Convenience: if the user calls `agent-cli-to-api <provider>`, apply a sensible preset
+        # when it is safe to do so (no hard requirement for a custom .env).
+        if normalized_provider == "codex":
+            os.environ.setdefault("CODEX_PRESET", "codex-fast")
+        elif normalized_provider == "cursor-agent":
+            os.environ.setdefault("CODEX_PRESET", "cursor-auto")
+        elif normalized_provider == "gemini":
+            creds = Path(os.environ.get("GEMINI_OAUTH_CREDS_PATH", "~/.gemini/oauth_creds.json")).expanduser()
+            if creds.exists():
+                os.environ.setdefault("CODEX_PRESET", "gemini-cloudcode")
+        elif normalized_provider == "claude":
+            creds = Path(os.environ.get("CLAUDE_OAUTH_CREDS_PATH", "~/.claude/oauth_creds.json")).expanduser()
+            if creds.exists():
+                os.environ.setdefault("CODEX_PRESET", "claude-oauth")
 
     uvicorn.run(
         "codex_gateway.server:app",

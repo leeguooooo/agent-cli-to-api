@@ -37,69 +37,32 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Run
+## Run (No `.env` Needed)
 
-By default it only binds to localhost (`127.0.0.1`) and uses `--sandbox read-only`.
-
-### With `.env` + helper script (recommended)
+Pick a provider and start the gateway:
 
 ```bash
-cp .env.example .env
-./scripts/serve.sh
+uv run agent-cli-to-api codex
+uv run agent-cli-to-api gemini
+uv run agent-cli-to-api claude
+uv run agent-cli-to-api cursor-agent
 ```
 
-### With the `agent-cli-to-api` CLI
+Optional auth:
 
 ```bash
-cp .env.example .env
-uv run agent-cli-to-api
+CODEX_GATEWAY_TOKEN=devtoken uv run agent-cli-to-api codex
 ```
 
-By default it auto-loads `.env` from the current directory, or falls back to the `codex-api/.env` next to the installed package (and prints which one it loaded).
-
-### With `uvx` (no venv, no clone)
-
-You still need the agent CLI(s) (`codex`, `cursor-agent`, `claude`, `gemini`) installed on your system `PATH`.
+Custom bind host/port:
 
 ```bash
-cp .env.example .env
-uvx --from git+https://github.com/leeguooooo/agent-cli-to-api --env-file .env agent-cli-to-api
+uv run agent-cli-to-api codex --host 127.0.0.1 --port 8000
 ```
 
-```bash
-export CODEX_WORKSPACE=/path/to/your/workspace
-export CODEX_GATEWAY_TOKEN=devtoken   # optional but recommended
-uv run uvicorn main:app --host 127.0.0.1 --port 8000
-```
-
-If you installed via pip + activated a venv:
-
-```bash
-uvicorn main:app --host 127.0.0.1 --port 8000
-```
-
-To allow “online access”, bind to `0.0.0.0` and put it behind a reverse proxy / firewall:
-
-```bash
-uv run uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
-### Expose to the internet (Cloudflare Tunnel)
-
-If you want to provide an “online API” without binding to `0.0.0.0`, use a tunnel and keep the server on localhost:
-
-```bash
-export CODEX_GATEWAY_TOKEN=devtoken
-uv run uvicorn main:app --host 127.0.0.1 --port 8000
-```
-
-In another terminal:
-
-```bash
-cloudflared tunnel --url http://127.0.0.1:8000
-```
-
-Keep `CODEX_GATEWAY_TOKEN` enabled, and consider Cloudflare Access / IP allowlists before exposing any sandbox other than `read-only`.
+Notes:
+- If `CODEX_WORKSPACE` is unset, the gateway creates an empty temp workspace under `/tmp` (so you don't need to configure a repo path).
+- Each provider still requires its own local CLI login state (no API key is required for Codex / Gemini CloudCode / Claude OAuth).
 
 ## API
 
@@ -197,107 +160,63 @@ const resp = await client.chat.completions.create({
 console.log(resp.choices[0].message.content);
 ```
 
-## Configuration (env vars)
+<details>
+<summary><strong>Advanced (Optional): .env / env vars / multi-provider / tunnels</strong></summary>
 
-If you only want a minimal setup, use a preset:
+### Use `.env`
+
+```bash
+cp .env.example .env
+uv run agent-cli-to-api codex
+```
+
+The server auto-loads `.env` from the current directory (or `codex-api/.env` when running from this repo).
+
+### Presets
 
 ```bash
 export CODEX_PRESET=codex-fast
-```
-
-Or:
-
-```bash
-uv run agent-cli-to-api --preset codex-fast
+uv run agent-cli-to-api codex
 ```
 
 Supported presets:
 - `codex-fast`
-- `multi-fast` (allow request-side provider prefixes like `cursor:...`)
 - `autoglm-phone`
 - `cursor-auto`
 - `claude-oauth`
 - `gemini-cloudcode`
 
-- `CODEX_NO_DOTENV`: `1/0` (default: `0`) disable auto-loading `.env` when running `uvicorn main:app`
-- `CODEX_WORKSPACE`: workspace directory for CLI providers (default: an empty temp dir under `/tmp`; set this when you want the agent to read/edit a real repo)
-- `CODEX_CLI_HOME`: override HOME for the `codex` subprocess (default: `./.codex-gateway-home`)
-- `CODEX_USE_SYSTEM_CODEX_HOME`: `1/0` (default: `0`) use your normal `~/.codex` config instead of the gateway home
-- `CODEX_USE_CODEX_RESPONSES_API`: `1/0` (default: `0`) use the Codex backend `/responses` API for all Codex requests (vision requests auto-use it)
-  - Note: `/responses` mode sets `tool_choice=none` (no MCP/tools); use `codex exec` for tool-driven coding tasks.
-- `CODEX_CODEX_BASE_URL`: Codex backend base URL (default: `https://chatgpt.com/backend-api/codex`)
-- `CODEX_CODEX_VERSION`: Codex backend `Version` header (default: `0.21.0`)
-- `CODEX_CODEX_USER_AGENT`: Codex backend `User-Agent` header (default: `codex_cli_rs/...`)
-- `CODEX_MODEL`: default model id (default: `gpt-5-codex`)
-- `CODEX_MODEL_ALIASES`: JSON map of request model -> real model (e.g. `{"autoglm-phone":"gpt-5.2"}`)
-- `CODEX_ADVERTISED_MODELS`: comma-separated list for `GET /v1/models` (defaults to `CODEX_MODEL`)
-- `CODEX_PROVIDER`: `auto|codex|cursor-agent|claude|gemini` (default: `auto`) choose which CLI/provider this gateway uses
-  - If not `auto`, the gateway ignores request-side provider prefixes like `cursor:...` by default (operator-controlled).
-- `CODEX_ALLOW_CLIENT_PROVIDER_OVERRIDE`: `1/0` (default: `0`) allow request-side provider prefixes to override `CODEX_PROVIDER`
-- `CODEX_ALLOW_CLIENT_MODEL_OVERRIDE`: `1/0` (default: `0`) allow the client to override the provider-specific model via request `model`
-- `CODEX_MODEL_REASONING_EFFORT`: `low|medium|high|xhigh` (default: `low`)
-- `CODEX_FORCE_REASONING_EFFORT`: if set, overrides any request-provided effort (e.g. force `low` for automation)
-- `CODEX_SANDBOX`: `read-only` | `workspace-write` | `danger-full-access` (default: `read-only`)
-- `CODEX_APPROVAL_POLICY`: `untrusted|on-failure|on-request|never` (default: `never`)
-- `CODEX_DISABLE_SHELL_TOOL`: `1/0` (default: `1`) disable Codex shell tool so responses stay "model-like" and avoid surprise command executions
-- `CODEX_DISABLE_VIEW_IMAGE_TOOL`: `1/0` (default: `1`) disable Codex `view_image_tool` so models prefer native vision (reduces MCP tool calls; helpful for screenshot-based agents like Open-AutoGLM)
-- `CODEX_ENABLE_SEARCH`: `1/0` (default: `0`)
-- `CODEX_ADD_DIRS`: comma-separated extra writable dirs (default: empty)
-- `CODEX_SKIP_GIT_REPO_CHECK`: `1/0` (default: `1`)
-- `CODEX_GATEWAY_TOKEN`: if set, require `Authorization: Bearer ...`
-- `CODEX_TIMEOUT_SECONDS`: (default: `600`)
-- `CODEX_MAX_CONCURRENCY`: (default: `2`)
-- `CODEX_MAX_PROMPT_CHARS`: (default: `200000`)
-- `CODEX_SUBPROCESS_STREAM_LIMIT`: asyncio stream limit for subprocess pipes (default: `16777216`)
-- `CODEX_CORS_ORIGINS`: comma-separated origins for CORS (default: empty/disabled)
-- `CODEX_SSE_KEEPALIVE_SECONDS`: send SSE keep-alives to prevent client read timeouts (default: `2`)
-- `CODEX_STRIP_ANSWER_TAGS`: `1/0` (default: `1`) strip `<think>/<answer>` tags for action-parsing clients (e.g. Open-AutoGLM)
-- `CODEX_ENABLE_IMAGE_INPUT`: `1/0` (default: `1`) decode OpenAI-style `image_url` parts and pass them to `codex exec --image`
-- `CODEX_MAX_IMAGE_COUNT`: (default: `4`)
-- `CODEX_MAX_IMAGE_BYTES`: (default: `8388608`)
-- `CODEX_LOG_MODE`: `summary|qa|full` (default: `summary`) log blocks (`qa` shows last USER + assistant; `full` shows the full prompt)
-- `CODEX_LOG_EVENTS`: `1/0` (default: `0`) log raw CLI/backend events (very noisy)
-- `CODEX_LOG_MAX_CHARS`: truncate long log blocks (default: `4000`)
-
-Claude OAuth direct mode:
-- `CLAUDE_USE_OAUTH_API`: `1/0` (default: `0`) call Anthropic HTTP API directly instead of spawning `claude`
-- `CLAUDE_OAUTH_CREDS_PATH`: OAuth cache path (default: `~/.claude/oauth_creds.json`)
-- `CLAUDE_OAUTH_BASE_URL`: token refresh base URL (default: `https://console.anthropic.com`)
-- `CLAUDE_OAUTH_CLIENT_ID`: override OAuth client id (default: built-in)
-- `CLAUDE_API_BASE_URL`: inference base URL (default: `https://api.anthropic.com`)
-
-To generate `CLAUDE_OAUTH_CREDS_PATH` without an API key:
+### Claude OAuth direct (no API key)
 
 ```bash
 uv run python -m codex_gateway.claude_oauth_login
+CLAUDE_USE_OAUTH_API=1 uv run agent-cli-to-api claude
 ```
-- `CODEX_DEBUG_LOG`: `1/0` (default: `0`) legacy flag; if set and `CODEX_LOG_MODE` is unset, defaults to `qa`
 
-## Multi-provider (optional)
+### Multi-provider routing
 
-If you have other agent CLIs installed, you can either:
+Use `CODEX_PROVIDER=auto` and select providers per-request by prefixing `model`:
+- Codex: `"gpt-5.2"`
+- Cursor: `"cursor:<model>"`
+- Claude: `"claude:<model>"`
+- Gemini: `"gemini:<model>"`
 
-- Force a single provider via `CODEX_PROVIDER=codex|cursor-agent|claude|gemini` (recommended for “API callers can’t choose agent”).
-  - For Cursor “auto”: set `CURSOR_AGENT_MODEL=auto` and keep `CODEX_ALLOW_CLIENT_MODEL_OVERRIDE=0` so client `model` strings are ignored. If `CURSOR_AGENT_MODEL` is unset, it defaults to `auto`.
-- Or keep `CODEX_PROVIDER=auto` and select providers per-request by prefixing `model`:
+### `uvx` (no venv)
 
-- Codex CLI: `"gpt-5.2"` (default) or any Codex model id
-- Cursor Agent: `"cursor-agent:<model>"` or `"cursor:<model>"` (e.g. `cursor:sonnet-4-thinking`)
-- Claude Code: `"claude:<model>"` or `"claude-code:<model>"` (e.g. `claude:sonnet`)
-- Gemini CLI: `"gemini:<model>"` or `"gemini"` (e.g. `gemini:gemini-2.0-flash`)
+```bash
+uvx --from git+https://github.com/leeguooooo/agent-cli-to-api agent-cli-to-api codex
+```
 
-Optional env vars:
+### Cloudflare Tunnel
 
-- `CURSOR_AGENT_BIN`, `CLAUDE_BIN`, `GEMINI_BIN`: override the CLI binary names/paths
-- `CURSOR_AGENT_API_KEY` / `CURSOR_API_KEY`: Cursor authentication for `cursor-agent`
-- `CURSOR_AGENT_MODEL`, `CLAUDE_MODEL`, `GEMINI_MODEL`: default model when the prefix doesn’t include `:<model>`
-- `CURSOR_AGENT_WORKSPACE`: override `--workspace` just for `cursor-agent` (use an empty dir to avoid repo reads for automation workloads)
-- `CURSOR_AGENT_DISABLE_INDEXING`: `1/0` (default: `1`) pass `--disable-indexing` to `cursor-agent`
-- `CURSOR_AGENT_EXTRA_ARGS`: extra CLI flags passed to `cursor-agent` (e.g. `--endpoint ... --http-version 2`)
-- `GEMINI_USE_CLOUDCODE_API`: `1/0` (default: `0`) call Gemini Cloud Code Assist directly (Gemini CLI backend) using local OAuth cache
-- `GEMINI_OAUTH_CREDS_PATH`: path to Gemini OAuth cache (default: `~/.gemini/oauth_creds.json`)
-- `GEMINI_PROJECT_ID`: optional fixed GCP project id for CloudCode (if unset, the gateway auto-picks the first ACTIVE project and caches it)
-- `GEMINI_OAUTH_CLIENT_ID`, `GEMINI_OAUTH_CLIENT_SECRET`: optional; only needed if the gateway can’t auto-detect the Gemini CLI OAuth client from your local `gemini` binary
+```bash
+CODEX_GATEWAY_TOKEN=devtoken uv run agent-cli-to-api codex
+cloudflared tunnel --url http://127.0.0.1:8000
+```
+
+For advanced env vars, see `.env.example` and `codex_gateway/config.py`.
+
+</details>
 
 ## Keywords (SEO)
 
