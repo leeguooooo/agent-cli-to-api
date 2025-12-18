@@ -419,7 +419,7 @@ def _print_qa_together(
     usage: dict[str, int] | None = None,
 ) -> bool:
     """
-    Print Question and Answer together in a single grouped panel.
+    Print Question and Answer together in a single unified panel.
     This ensures Q and A stay together even under high concurrency.
     """
     if not settings.log_render_markdown:
@@ -430,7 +430,6 @@ def _print_qa_together(
         from rich.console import Console
         from rich.markdown import Markdown
         from rich.panel import Panel
-        from rich.console import Group
     except Exception:
         return False
 
@@ -440,29 +439,32 @@ def _print_qa_together(
 
     console: Console = _RICH_CONSOLE  # type: ignore[assignment]
     short = _short_id(resp_id)
-    
-    # Prepare Q panel content
     panel_limit = max(settings.log_max_chars * 10, 50000)
-    q_payload = question[:panel_limit] if len(question) > panel_limit else question
-    q_payload = q_payload.rstrip("\n")
-    q_title = f"📝 Question [{short}] 📏 {len(question):,} chars"
-    q_panel = Panel(Markdown(q_payload), title=q_title, border_style="cyan", expand=False)
     
-    # Prepare A panel content
-    a_payload = answer[:panel_limit] if len(answer) > panel_limit else answer
-    a_payload = a_payload.rstrip("\n")
-    parts = [f"✅ Answer [{short}]"]
+    # Build combined content with Q and A sections
+    combined_parts = []
+    
+    if question:
+        q_payload = question[:panel_limit] if len(question) > panel_limit else question
+        combined_parts.append(f"## 📝 Question ({len(question):,} chars)\n\n{q_payload.rstrip()}")
+    
+    if answer:
+        a_payload = answer[:panel_limit] if len(answer) > panel_limit else answer
+        combined_parts.append(f"## ✅ Answer\n\n{a_payload.rstrip()}")
+    
+    combined = "\n\n---\n\n".join(combined_parts)
+    
+    # Build title with stats
+    title_parts = [f"[{short}]"]
     if duration_ms:
-        parts.append(f"⏱️ {duration_ms/1000:.1f}s")
+        title_parts.append(f"⏱️ {duration_ms/1000:.1f}s")
     if usage:
         total = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
         if total > 0:
-            parts.append(f"🔢 {total:,} tokens")
-    a_title = " ".join(parts)
-    a_panel = Panel(Markdown(a_payload), title=a_title, border_style="green", expand=False)
+            title_parts.append(f"🔢 {total:,} tokens")
+    title = " ".join(title_parts)
     
-    # Print both panels as a group (atomically)
-    console.print(Group(q_panel, a_panel))
+    console.print(Panel(Markdown(combined), title=title, border_style="blue", expand=False))
     return True
 
 
