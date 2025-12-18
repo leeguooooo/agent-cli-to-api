@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -142,6 +143,12 @@ def main(argv: list[str] | None = None) -> None:
             if creds.exists():
                 os.environ.setdefault("CODEX_PRESET", "claude-oauth")
 
+    # UX defaults (TTY): enable colored logs and markdown rendering unless explicitly disabled.
+    # Users can opt out by setting CODEX_RICH_LOGS=0 / CODEX_LOG_RENDER_MARKDOWN=0.
+    if sys.stderr.isatty():
+        os.environ.setdefault("CODEX_RICH_LOGS", "1")
+        os.environ.setdefault("CODEX_LOG_RENDER_MARKDOWN", "1")
+
     if provider_raw == "doctor":
         import asyncio
 
@@ -151,6 +158,16 @@ def main(argv: list[str] | None = None) -> None:
         from .doctor import run_doctor
 
         raise SystemExit(asyncio.run(run_doctor()))
+
+    # Always print a minimal startup line so users aren't confused when log level hides uvicorn INFO logs.
+    try:
+        print(
+            f"[agent-cli-to-api] starting provider={normalized_provider or os.environ.get('CODEX_PROVIDER','auto')} "
+            f"host={args.host} port={args.port} log_level={args.log_level}",
+            file=sys.stderr,
+        )
+    except Exception:
+        pass
 
     uvicorn.run(
         "codex_gateway.server:app",
