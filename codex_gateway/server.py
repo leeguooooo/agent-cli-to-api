@@ -241,6 +241,7 @@ def _maybe_print_markdown(resp_id: str, label: str, text: str) -> bool:
     try:
         from rich.console import Console
         from rich.markdown import Markdown
+        from rich.panel import Panel
         from rich.text import Text
     except Exception:
         return False
@@ -252,9 +253,36 @@ def _maybe_print_markdown(resp_id: str, label: str, text: str) -> bool:
 
     console: Console = _RICH_CONSOLE  # type: ignore[assignment]
     payload = _truncate_for_log(text).rstrip("\n")
-    console.print(Text(f"[{resp_id}] {label} (markdown):", style="bold"))
-    console.print(Markdown(payload))
+    
+    # Use different styles for Q vs A
+    if label == "Q":
+        style = "cyan"
+        title = f"📝 [{resp_id}] Question"
+    elif label == "A":
+        style = "green"
+        title = f"✅ [{resp_id}] Answer"
+    else:
+        style = "blue"
+        title = f"[{resp_id}] {label}"
+    
+    console.print(Panel(Markdown(payload), title=title, border_style=style, expand=False))
     return True
+
+
+def _print_separator(resp_id: str, label: str = "REQUEST") -> None:
+    """Print a visual separator for new requests."""
+    try:
+        from rich.console import Console
+        from rich.rule import Rule
+    except Exception:
+        return
+    
+    global _RICH_CONSOLE
+    if _RICH_CONSOLE is None:
+        _RICH_CONSOLE = Console(stderr=True)
+    
+    console: Console = _RICH_CONSOLE  # type: ignore[assignment]
+    console.print(Rule(f"🔷 {label} {resp_id}", style="bold blue"))
 
 
 _AUTOMATION_GUARD = """SYSTEM: IMPORTANT (Open-AutoGLM action mode)
@@ -606,6 +634,10 @@ async def chat_completions(
             effort_source = "request"
         elif not default_effort:
             effort_source = "fallback"
+        # Print visual separator for easier request tracking
+        if settings.log_render_markdown:
+            _print_separator(resp_id, f"{provider}/{mode_label}")
+        
         logger.info(
             "[%s] request model=%s resolved=%s provider=%s mode=%s stream=%s effort=%s images=%d client_model=%s ignored=%s",
             resp_id,
@@ -629,7 +661,8 @@ async def chat_completions(
                     q = normalize_message_content(m.content)
                     break
             if q:
-                logger.info("[%s] Q:\n%s", resp_id, _truncate_for_log(q))
+                if not _maybe_print_markdown(resp_id, "Q", q):
+                    logger.info("[%s] Q:\n%s", resp_id, _truncate_for_log(q))
         elif log_mode == "full":
             logger.info("[%s] PROMPT:\n%s", resp_id, _truncate_for_log(prompt))
 
