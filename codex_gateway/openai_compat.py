@@ -14,8 +14,9 @@ class ChatCompletionRequest(BaseModel):
     model: str | None = None
     messages: list[ChatMessage]
     stream: bool = False
+    max_tokens: int | None = None
 
-    # Accept extra fields from clients (temperature, max_tokens, etc.).
+    # Accept extra fields from clients (temperature, etc.).
     model_config = ConfigDict(extra="allow")
 
 

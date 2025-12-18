@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from .openai_compat import ChatCompletionRequest, ChatMessage
 _ANTHROPIC_VERSION = "2023-06-01"
 _DEFAULT_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
+logger = logging.getLogger("uvicorn.error")
+
 
 @dataclass(frozen=True)
 class ClaudeOAuthCreds:
@@ -21,6 +24,52 @@ class ClaudeOAuthCreds:
     refresh_token: str | None
     expires_at_s: int | None
     token_type: str | None
+
+
+@dataclass(frozen=True)
+class ClaudeCliConfig:
+    """Configuration extracted from Claude CLI's settings.json."""
+    base_url: str | None
+    auth_token: str | None
+    default_model: str | None
+
+
+def _load_claude_cli_settings() -> ClaudeCliConfig:
+    """Load Claude CLI settings from ~/.claude/settings.json."""
+    settings_path = Path.home() / ".claude" / "settings.json"
+    try:
+        raw = json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return ClaudeCliConfig(None, None, None)
+    if not isinstance(raw, dict):
+        return ClaudeCliConfig(None, None, None)
+    
+    # Extract env from settings.json
+    env = raw.get("env") or {}
+    if not isinstance(env, dict):
+        env = {}
+    
+    base_url = env.get("ANTHROPIC_BASE_URL")
+    auth_token = env.get("ANTHROPIC_AUTH_TOKEN")
+    default_model = env.get("ANTHROPIC_DEFAULT_SONNET_MODEL")
+    
+    return ClaudeCliConfig(
+        base_url if isinstance(base_url, str) else None,
+        auth_token if isinstance(auth_token, str) else None,
+        default_model if isinstance(default_model, str) else None,
+    )
+
+
+# Cache the CLI config at module load time
+_cli_config: ClaudeCliConfig | None = None
+
+
+def get_claude_cli_config() -> ClaudeCliConfig:
+    """Get cached Claude CLI configuration."""
+    global _cli_config
+    if _cli_config is None:
+        _cli_config = _load_claude_cli_settings()
+    return _cli_config
 
 
 def _load_creds(path: Path) -> ClaudeOAuthCreds:
@@ -228,17 +277,61 @@ def _extract_usage_from_anthropic_response(data: Any) -> dict[str, int] | None:
     return {"prompt_tokens": in_tokens, "completion_tokens": out_tokens, "total_tokens": in_tokens + out_tokens}
 
 
+def _get_auth_and_url() -> tuple[str, str]:
+    """
+    Get auth token and base URL, preferring Claude CLI settings.json config.
+    Falls back to OAuth creds and gateway settings if CLI config not available.
+    """
+    cli_config = get_claude_cli_config()
+    
+    # Prefer CLI config (from ~/.claude/settings.json)
+    if cli_config.auth_token and cli_config.base_url:
+        logger.debug("Using Claude CLI config: base_url=%s", cli_config.base_url)
+        return cli_config.auth_token, cli_config.base_url
+    
+    # Fall back to OAuth creds
+    creds_path = Path(settings.claude_oauth_creds_path).expanduser()
+    creds = _load_creds(creds_path)
+    if creds.access_token:
+        return creds.access_token, settings.claude_api_base_url
+    
+    raise RuntimeError(
+        "Claude API: no authentication available. "
+        "Either configure ANTHROPIC_AUTH_TOKEN in ~/.claude/settings.json, "
+        "or run claude-oauth-login to set up OAuth credentials."
+    )
+
+
 async def generate_oauth(
     *,
     req: ChatCompletionRequest,
     model_name: str,
 ) -> tuple[str, dict[str, int] | None]:
-    creds = await maybe_refresh_claude_oauth(settings.claude_oauth_creds_path)
-    if not creds.access_token:
-        raise RuntimeError("Claude OAuth: missing access_token (set up OAuth credentials first)")
+    t0 = time.time()
+    
+    # Try CLI config first, then OAuth creds
+    cli_config = get_claude_cli_config()
+    
+    if cli_config.auth_token and cli_config.base_url:
+        # Use CLI config directly (API key style)
+        auth_token = cli_config.auth_token
+        base_url = cli_config.base_url
+        # Use CLI's default model if model_name is generic
+        if model_name in ("sonnet", "opus", "haiku") and cli_config.default_model:
+            model_name = cli_config.default_model
+        logger.debug("Using Claude CLI config: base_url=%s model=%s", base_url, model_name)
+    else:
+        # Fall back to OAuth flow
+        creds = await maybe_refresh_claude_oauth(settings.claude_oauth_creds_path)
+        if not creds.access_token:
+            raise RuntimeError("Claude OAuth: missing access_token (set up OAuth credentials first)")
+        auth_token = creds.access_token
+        base_url = settings.claude_api_base_url
 
+    t_auth = time.time()
+    
     system, messages = _openai_messages_to_anthropic(req)
-    max_tokens = int(req.max_tokens or 1024)
+    max_tokens = int(req.max_tokens or 8192)
     payload: dict[str, Any] = {
         "model": model_name,
         "max_tokens": max_tokens,
@@ -248,11 +341,19 @@ async def generate_oauth(
         payload["system"] = system
 
     headers = {
-        "Authorization": f"Bearer {creds.access_token}",
+        "Authorization": f"Bearer {auth_token}",
         "anthropic-version": _ANTHROPIC_VERSION,
         "Accept": "application/json",
     }
-    url = f"{settings.claude_api_base_url.rstrip('/')}/v1/messages"
+    url = f"{base_url.rstrip('/')}/v1/messages"
+    
+    t_prepare = time.time()
+    logger.info(
+        "claude-oauth request: url=%s model=%s max_tokens=%d msg_count=%d auth_ms=%d prepare_ms=%d",
+        url, model_name, max_tokens, len(messages),
+        int((t_auth - t0) * 1000), int((t_prepare - t_auth) * 1000)
+    )
+    
     client = await get_async_client("claude")
     resp = await request_json_with_retries(
         client=client,
@@ -262,8 +363,19 @@ async def generate_oauth(
         json=payload,
         headers=headers,
     )
+    
+    t_response = time.time()
     resp.raise_for_status()
     data = resp.json()
+    
+    t_parse = time.time()
+    logger.info(
+        "claude-oauth response: status=%d api_latency_ms=%d parse_ms=%d total_ms=%d",
+        resp.status_code,
+        int((t_response - t_prepare) * 1000),
+        int((t_parse - t_response) * 1000),
+        int((t_parse - t0) * 1000)
+    )
 
     return _extract_text_from_anthropic_response(data), _extract_usage_from_anthropic_response(data)
 
@@ -330,12 +442,27 @@ async def iter_oauth_stream_events(
     req: ChatCompletionRequest,
     model_name: str,
 ) -> AsyncIterator[dict]:
-    creds = await maybe_refresh_claude_oauth(settings.claude_oauth_creds_path)
-    if not creds.access_token:
-        raise RuntimeError("Claude OAuth: missing access_token (set up OAuth credentials first)")
+    # Try CLI config first, then OAuth creds
+    cli_config = get_claude_cli_config()
+    
+    if cli_config.auth_token and cli_config.base_url:
+        # Use CLI config directly (API key style)
+        auth_token = cli_config.auth_token
+        base_url = cli_config.base_url
+        # Use CLI's default model if model_name is generic
+        if model_name in ("sonnet", "opus", "haiku") and cli_config.default_model:
+            model_name = cli_config.default_model
+        logger.debug("Using Claude CLI config for streaming: base_url=%s model=%s", base_url, model_name)
+    else:
+        # Fall back to OAuth flow
+        creds = await maybe_refresh_claude_oauth(settings.claude_oauth_creds_path)
+        if not creds.access_token:
+            raise RuntimeError("Claude OAuth: missing access_token (set up OAuth credentials first)")
+        auth_token = creds.access_token
+        base_url = settings.claude_api_base_url
 
     system, messages = _openai_messages_to_anthropic(req)
-    max_tokens = int(req.max_tokens or 1024)
+    max_tokens = int(req.max_tokens or 8192)
     payload: dict[str, Any] = {
         "model": model_name,
         "max_tokens": max_tokens,
@@ -346,11 +473,11 @@ async def iter_oauth_stream_events(
         payload["system"] = system
 
     headers = {
-        "Authorization": f"Bearer {creds.access_token}",
+        "Authorization": f"Bearer {auth_token}",
         "anthropic-version": _ANTHROPIC_VERSION,
         "Accept": "text/event-stream",
     }
-    url = f"{settings.claude_api_base_url.rstrip('/')}/v1/messages"
+    url = f"{base_url.rstrip('/')}/v1/messages"
 
     usage: dict[str, int] | None = None
     client = await get_async_client("claude-stream")

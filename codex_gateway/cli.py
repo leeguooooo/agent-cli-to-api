@@ -139,9 +139,28 @@ def main(argv: list[str] | None = None) -> None:
             if creds.exists():
                 os.environ.setdefault("CODEX_PRESET", "gemini-cloudcode")
         elif normalized_provider == "claude":
+            # Check for OAuth creds first
             creds = Path(os.environ.get("CLAUDE_OAUTH_CREDS_PATH", "~/.claude/oauth_creds.json")).expanduser()
             if creds.exists():
                 os.environ.setdefault("CODEX_PRESET", "claude-oauth")
+                print(f"[agent-cli-to-api] detected Claude OAuth creds: {creds}", file=sys.stderr)
+            else:
+                # Also check for Claude CLI settings.json with ANTHROPIC_AUTH_TOKEN
+                cli_settings = Path.home() / ".claude" / "settings.json"
+                if cli_settings.exists():
+                    try:
+                        import json
+                        data = json.loads(cli_settings.read_text(encoding="utf-8"))
+                        env = data.get("env") or {}
+                        if env.get("ANTHROPIC_AUTH_TOKEN") and env.get("ANTHROPIC_BASE_URL"):
+                            os.environ.setdefault("CODEX_PRESET", "claude-oauth")
+                            print(f"[agent-cli-to-api] detected Claude CLI config (API key mode)", file=sys.stderr)
+                        else:
+                            print(f"[agent-cli-to-api] settings.json exists but missing ANTHROPIC_AUTH_TOKEN or ANTHROPIC_BASE_URL", file=sys.stderr)
+                    except Exception as e:
+                        print(f"[agent-cli-to-api] failed to parse settings.json: {e}", file=sys.stderr)
+                else:
+                    print(f"[agent-cli-to-api] no OAuth creds or CLI config found, using CLI mode", file=sys.stderr)
 
     # UX defaults (TTY): enable colored logs and markdown rendering unless explicitly disabled.
     # Users can opt out by setting CODEX_RICH_LOGS=0 / CODEX_LOG_RENDER_MARKDOWN=0.
