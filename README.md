@@ -188,6 +188,22 @@ uv run agent-cli-to-api codex --env-file .env
 
 Tip: you can also opt-in to loading `.env` from the current directory with `--auto-env`.
 
+### Prettier terminal logs (optional)
+
+Enable colored logs (Rich handler):
+
+```bash
+export CODEX_RICH_LOGS=1
+uv run agent-cli-to-api codex
+```
+
+Render assistant output as Markdown in the terminal (best-effort; prints a separate block to stderr):
+
+```bash
+export CODEX_LOG_RENDER_MARKDOWN=1
+uv run agent-cli-to-api codex
+```
+
 ### Presets
 
 ```bash

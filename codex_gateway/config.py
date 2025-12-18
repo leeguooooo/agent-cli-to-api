@@ -455,6 +455,8 @@ class Settings:
     debug_log: bool = _env_bool("CODEX_DEBUG_LOG", False)
     log_events: bool = _env_bool("CODEX_LOG_EVENTS", False)
     log_max_chars: int = _env_int("CODEX_LOG_MAX_CHARS", 4000)
+    rich_logs: bool = _env_bool("CODEX_RICH_LOGS", False)
+    log_render_markdown: bool = _env_bool("CODEX_LOG_RENDER_MARKDOWN", False)
 
     def effective_log_mode(self) -> str:
         mode = (self.log_mode or "").strip().lower()

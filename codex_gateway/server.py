@@ -224,6 +224,37 @@ def _truncate_for_log(text: str) -> str:
     return f"{text[:limit]}\n... (truncated, {len(text)} chars total)"
 
 
+_RICH_CONSOLE = None
+
+
+def _maybe_print_markdown(resp_id: str, label: str, text: str) -> bool:
+    """
+    Best-effort: render markdown to the terminal for easier reading.
+    Returns True if rendered (so callers can skip duplicate plain logging).
+    """
+    if not settings.log_render_markdown:
+        return False
+    if not text:
+        return False
+    try:
+        from rich.console import Console
+        from rich.markdown import Markdown
+        from rich.text import Text
+    except Exception:
+        return False
+
+    global _RICH_CONSOLE
+    if _RICH_CONSOLE is None:
+        # stderr matches uvicorn's default logging stream.
+        _RICH_CONSOLE = Console(stderr=True)
+
+    console: Console = _RICH_CONSOLE  # type: ignore[assignment]
+    payload = _truncate_for_log(text).rstrip("\n")
+    console.print(Text(f"[{resp_id}] {label} (markdown):", style="bold"))
+    console.print(Markdown(payload))
+    return True
+
+
 _AUTOMATION_GUARD = """SYSTEM: IMPORTANT (Open-AutoGLM action mode)
 - This is an Android UI automation loop. You will be given a screenshot each turn.
 - The screenshot is already attached as an image in the user's message; use it directly (native vision).
@@ -974,9 +1005,11 @@ async def chat_completions(
             usage_str = f" usage={usage}" if isinstance(usage, dict) else ""
             logger.info("[%s] response status=200 duration_ms=%d chars=%d%s", resp_id, duration_ms, len(text), usage_str)
             if log_mode == "qa" and text:
-                logger.info("[%s] A:\n%s", resp_id, _truncate_for_log(text))
+                if not _maybe_print_markdown(resp_id, "A", text):
+                    logger.info("[%s] A:\n%s", resp_id, _truncate_for_log(text))
             elif log_mode == "full" and text:
-                logger.info("[%s] RESPONSE:\n%s", resp_id, _truncate_for_log(text))
+                if not _maybe_print_markdown(resp_id, "RESPONSE", text):
+                    logger.info("[%s] RESPONSE:\n%s", resp_id, _truncate_for_log(text))
             response: dict = {
                 "id": resp_id,
                 "object": "chat.completion",
@@ -1368,9 +1401,11 @@ async def chat_completions(
                     usage_str,
                 )
                 if log_mode == "qa" and assembled:
-                    logger.info("[%s] A:\n%s", resp_id, _truncate_for_log(assembled))
+                    if not _maybe_print_markdown(resp_id, "A", assembled):
+                        logger.info("[%s] A:\n%s", resp_id, _truncate_for_log(assembled))
                 elif log_mode == "full" and assembled:
-                    logger.info("[%s] RESPONSE:\n%s", resp_id, _truncate_for_log(assembled))
+                    if not _maybe_print_markdown(resp_id, "RESPONSE", assembled):
+                        logger.info("[%s] RESPONSE:\n%s", resp_id, _truncate_for_log(assembled))
 
         return StreamingResponse(sse_gen(), media_type="text/event-stream")
     except (asyncio.TimeoutError, TimeoutError):

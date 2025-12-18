@@ -158,7 +158,18 @@ def main(argv: list[str] | None = None) -> None:
         port=args.port,
         reload=args.reload,
         log_level=args.log_level,
+        log_config=_rich_log_config(args.log_level),
     )
 
 
 __all__ = ["main"]
+
+
+def _rich_log_config(level: str) -> dict | None:
+    from .config import settings
+
+    if not settings.rich_logs:
+        return None
+    from .rich_logging import build_rich_log_config
+
+    return build_rich_log_config(level=level)
