@@ -146,6 +146,7 @@ def _apply_preset() -> None:
         "claude-oauth": {
             "CODEX_PROVIDER": "claude",
             "CLAUDE_USE_OAUTH_API": "1",
+            "CODEX_MAX_CONCURRENCY": "20",  # HTTP API, maximize throughput
             "CODEX_LOG_MODE": "qa",
             "CODEX_LOG_MAX_CHARS": "4000",
             "CODEX_LOG_EVENTS": "0",
@@ -228,6 +229,7 @@ def _apply_preset_env() -> None:
             "CODEX_PROVIDER": "claude",
             "CLAUDE_USE_OAUTH_API": "1",
             "CLAUDE_MODEL": "sonnet",
+            "CODEX_MAX_CONCURRENCY": "20",  # HTTP API, maximize throughput
             "CODEX_LOG_MODE": "qa",
         },
         # Gemini direct HTTP + SSE (CloudCode; requires Gemini CLI login state).
