@@ -1420,6 +1420,7 @@ async def chat_completions(
             return response
 
         async def sse_gen():
+            global _active_requests
             assembled_text = ""
             stream_usage: dict[str, object] | None = None
             try:
