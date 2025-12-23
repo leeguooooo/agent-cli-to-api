@@ -6,13 +6,17 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
+import threading
 import time
 import uuid
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -36,10 +40,14 @@ from .http_client import aclose_all as _aclose_http_clients
 from .openai_compat import (
     ChatCompletionRequest,
     ChatMessage,
+    ChatCompletionRequestCompat,
     ErrorResponse,
+    ResponsesRequest,
+    compat_chat_request_to_chat_request,
     extract_image_urls,
     messages_to_prompt,
     normalize_message_content,
+    responses_request_to_chat_request,
 )
 from .stream_json_cli import (
     TextAssembler,
@@ -82,6 +90,36 @@ def _get_semaphore():
 def _get_active_requests() -> int:
     """Get current number of active requests."""
     return _active_requests
+
+
+@app.exception_handler(RequestValidationError)
+async def _handle_request_validation_error(request: Request, exc: RequestValidationError):
+    detail = ""
+    try:
+        detail = json.dumps(exc.errors(), ensure_ascii=False)
+    except Exception:
+        detail = str(exc)
+
+    body = getattr(exc, "body", None)
+    if body is None:
+        body_text = ""
+    else:
+        try:
+            if isinstance(body, (bytes, bytearray)):
+                body_text = body.decode(errors="ignore")
+            else:
+                body_text = json.dumps(body, ensure_ascii=False)
+        except Exception:
+            body_text = str(body)
+
+    logger.error(
+        "[validation] status=422 method=%s path=%s detail=%s body=%s",
+        request.method,
+        request.url.path,
+        _truncate_for_log(detail),
+        _truncate_for_log(body_text),
+    )
+    return await request_validation_exception_handler(request, exc)
 
 
 def _extract_reasoning_effort(req: ChatCompletionRequest) -> str | None:
@@ -190,7 +228,49 @@ def _openai_error(message: str, *, status_code: int = 500) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=payload)
 
 
+def _chat_completion_to_responses(chat: dict) -> dict:
+    created = int(chat.get("created") or time.time())
+    model = chat.get("model")
+    text = ""
+    choices = chat.get("choices") or []
+    if isinstance(choices, list) and choices:
+        first = choices[0]
+        if isinstance(first, dict):
+            message = first.get("message") or {}
+            if isinstance(message, dict):
+                text = normalize_message_content(message.get("content"))
+
+    usage_out = None
+    usage = chat.get("usage")
+    if isinstance(usage, dict):
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+        usage_out = {
+            "input_tokens": prompt_tokens,
+            "output_tokens": completion_tokens,
+            "total_tokens": int(usage.get("total_tokens") or (prompt_tokens + completion_tokens)),
+        }
+
+    output_msg = {
+        "id": f"msg_{uuid.uuid4().hex}",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": text}],
+    }
+    resp = {
+        "id": f"resp_{uuid.uuid4().hex}",
+        "object": "response",
+        "created": created,
+        "model": model,
+        "output": [output_msg],
+    }
+    if usage_out is not None:
+        resp["usage"] = usage_out
+    return resp
+
+
 _UPSTREAM_STATUS_RE = re.compile(r"(?:\bAPI Error:\s*|\bfailed:\s*)(\d{3})\b")
+_HTTPX_STATUS_RE = re.compile(r"\b(?:Client|Server) error '(\d{3})\b")
 _GENERIC_STATUS_RE = re.compile(r"\bstatus\s*[=:]\s*(\d{3})\b")
 
 
@@ -198,7 +278,7 @@ def _extract_upstream_status_code(err: BaseException) -> int | None:
     msg = str(err or "").strip()
     if not msg:
         return None
-    for rx in (_UPSTREAM_STATUS_RE, _GENERIC_STATUS_RE):
+    for rx in (_UPSTREAM_STATUS_RE, _HTTPX_STATUS_RE, _GENERIC_STATUS_RE):
         m = rx.search(msg)
         if m:
             try:
@@ -221,7 +301,7 @@ def _maybe_strip_answer_tags(text: str) -> str:
         return text
     for tag in ("<think>", "</think>", "<answer>", "</answer>"):
         text = text.replace(tag, "")
-    return text.strip()
+    return text
 
 
 def _truncate_for_log(text: str) -> str:
@@ -233,7 +313,46 @@ def _truncate_for_log(text: str) -> str:
     return f"{text[:limit]}\n... (truncated, {len(text)} chars total)"
 
 
+def _inline_log_text(text: str) -> str:
+    return _truncate_for_log(text).replace("\r", "").replace("\n", "\\n")
+
+
+def _stream_inline_append(resp_id: str, text: str) -> None:
+    if not text:
+        return
+    payload = _inline_log_text(text)
+    if not payload:
+        return
+    short = _short_id(resp_id)
+    with _STREAM_INLINE_LOCK:
+        global _STREAM_INLINE_CURRENT
+        if _STREAM_INLINE_CURRENT != resp_id:
+            if _STREAM_INLINE_CURRENT is not None:
+                sys.stderr.write("\n")
+            sys.stderr.write(f"[{short}] stream: ")
+            _STREAM_INLINE_CURRENT = resp_id
+        elif resp_id not in _STREAM_INLINE_ACTIVE:
+            sys.stderr.write(f"[{short}] stream: ")
+        _STREAM_INLINE_ACTIVE.add(resp_id)
+        sys.stderr.write(payload)
+        sys.stderr.flush()
+
+
+def _stream_inline_close(resp_id: str) -> None:
+    with _STREAM_INLINE_LOCK:
+        if resp_id in _STREAM_INLINE_ACTIVE:
+            global _STREAM_INLINE_CURRENT
+            if _STREAM_INLINE_CURRENT == resp_id:
+                sys.stderr.write("\n")
+                _STREAM_INLINE_CURRENT = None
+            sys.stderr.flush()
+            _STREAM_INLINE_ACTIVE.discard(resp_id)
+
+
 _RICH_CONSOLE = None
+_STREAM_INLINE_LOCK = threading.Lock()
+_STREAM_INLINE_ACTIVE: set[str] = set()
+_STREAM_INLINE_CURRENT: str | None = None
 
 
 def _short_id(resp_id: str) -> str:
@@ -241,6 +360,172 @@ def _short_id(resp_id: str) -> str:
     if resp_id.startswith("chatcmpl-"):
         return resp_id[9:17]  # First 8 chars after prefix
     return resp_id[:8]
+
+
+def _is_simple_value(value: object) -> bool:
+    return isinstance(value, (str, int, float, bool)) or value is None
+
+
+def _format_request_value(value: object, *, max_len: int = 160) -> str:
+    if _is_simple_value(value):
+        try:
+            text = json.dumps(value, ensure_ascii=True)
+        except Exception:
+            text = repr(value)
+    elif isinstance(value, list):
+        if len(value) <= 6 and all(_is_simple_value(v) for v in value):
+            try:
+                text = json.dumps(value, ensure_ascii=True)
+            except Exception:
+                text = repr(value)
+        else:
+            text = f"list(len={len(value)})"
+    elif isinstance(value, dict):
+        keys = list(value.keys())
+        if len(keys) <= 6 and all(_is_simple_value(value[k]) for k in keys):
+            try:
+                text = json.dumps(value, ensure_ascii=True)
+            except Exception:
+                text = repr(value)
+        else:
+            preview = ", ".join(str(k) for k in keys[:6])
+            if len(keys) > 6:
+                preview += ", ..."
+            text = f"dict(keys={len(keys)}: {preview})"
+    else:
+        text = repr(value)
+
+    text = text.replace("\r", "").replace("\n", "\\n").replace("`", "'")
+    if len(text) > max_len:
+        text = f"{text[:max_len]}... (len={len(text)})"
+    return text
+
+
+def _message_role_counts(messages: list[ChatMessage]) -> dict[str, int]:
+    counts: dict[str, int] = {"system": 0, "user": 0, "assistant": 0, "tool": 0, "developer": 0, "other": 0}
+    for msg in messages:
+        role = getattr(msg, "role", None)
+        if role in counts:
+            counts[role] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
+def _format_request_metadata(
+    req: ChatCompletionRequest,
+    *,
+    resolved_model: str,
+    provider: str,
+    mode_label: str,
+    reasoning_effort: str,
+    effort_source: str,
+    request_effort_raw: str | None,
+) -> tuple[str, str]:
+    items: list[tuple[str, str]] = []
+    client_model = (req.model or "").strip() or "<default>"
+    items.append(("model", client_model))
+    if resolved_model and resolved_model != client_model:
+        items.append(("resolved_model", resolved_model))
+    items.append(("provider", f"{provider}/{mode_label}"))
+    items.append(("stream", str(bool(req.stream)).lower()))
+    if req.max_tokens is not None:
+        items.append(("max_tokens", str(req.max_tokens)))
+
+    reasoning_parts = [f"effective={reasoning_effort}", f"source={effort_source}"]
+    if request_effort_raw:
+        reasoning_parts.append(f"request={request_effort_raw}")
+    items.append(("reasoning_effort", " ".join(reasoning_parts)))
+
+    counts = _message_role_counts(req.messages)
+    msg_summary = (
+        f"total={len(req.messages)} system={counts['system']} user={counts['user']} "
+        f"assistant={counts['assistant']} tool={counts['tool']} developer={counts['developer']}"
+    )
+    if counts.get("other"):
+        msg_summary += f" other={counts['other']}"
+    items.append(("messages", msg_summary))
+
+    image_count = len(extract_image_urls(req.messages))
+    if image_count:
+        items.append(("images", str(image_count)))
+
+    extra = getattr(req, "model_extra", None) or {}
+    extra_items: list[tuple[str, str]] = []
+    if isinstance(extra, dict):
+        skip = {"messages", "model", "stream", "max_tokens", "reasoning", "reasoning_effort", "prompt", "input"}
+        preferred = [
+            "temperature",
+            "top_p",
+            "top_k",
+            "n",
+            "stop",
+            "presence_penalty",
+            "frequency_penalty",
+            "seed",
+            "user",
+            "response_format",
+            "tool_choice",
+            "tools",
+            "functions",
+            "function_call",
+            "parallel_tool_calls",
+            "logit_bias",
+        ]
+        seen = set()
+        for key in preferred:
+            if key in extra and key not in skip:
+                extra_items.append((key, _format_request_value(extra[key])))
+                seen.add(key)
+        for key in sorted(extra.keys()):
+            if key in skip or key in seen:
+                continue
+            extra_items.append((key, _format_request_value(extra[key])))
+
+    md_lines = ["### Core"]
+    for key, value in items:
+        md_lines.append(f"- **{key}**: `{value}`")
+    if extra_items:
+        md_lines.append("")
+        md_lines.append("### Extras")
+        for key, value in extra_items:
+            md_lines.append(f"- **{key}**: `{value}`")
+
+    plain_parts = [f"{key}={value}" for key, value in items]
+    plain_parts.extend(f"{key}={value}" for key, value in extra_items)
+    md_text = "\n".join(md_lines)
+    plain_text = " ".join(plain_parts)
+    return md_text, plain_text
+
+
+def _pick_curl_delimiter(payload: str, base: str = "CODEX_CURL_PAYLOAD") -> str:
+    delim = base
+    suffix = 2
+    while delim in payload:
+        delim = f"{base}_{suffix}"
+        suffix += 1
+    return delim
+
+
+def _build_curl_command(
+    *,
+    url: str,
+    authorization: str | None,
+    payload: dict[str, object],
+    stream: bool,
+) -> str:
+    payload_json = json.dumps(payload, ensure_ascii=False, indent=2)
+    delimiter = _pick_curl_delimiter(payload_json)
+    flags = "-sS"
+    if stream:
+        flags += " -N"
+    lines = [f"curl {flags} -X POST {url} \\", "  -H 'Content-Type: application/json' \\"]
+    if authorization:
+        lines.append(f"  -H 'Authorization: {authorization}' \\")
+    lines.append(f"  -d @- <<'{delimiter}'")
+    lines.append(payload_json)
+    lines.append(delimiter)
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -760,6 +1045,7 @@ async def healthz():
 
 
 @app.get("/v1/models")
+@app.get("/models")
 async def list_models(authorization: str | None = Header(default=None)):
     _check_auth(authorization)
     forced_provider = _normalize_provider(settings.provider)
@@ -841,13 +1127,43 @@ async def debug_config(authorization: str | None = Header(default=None)):
     }
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(
-    req: ChatCompletionRequest,
+@app.post("/v1/responses")
+@app.post("/responses")
+async def responses(
+    req: ResponsesRequest,
     request: Request,
     authorization: str | None = Header(default=None),
 ):
     _check_auth(authorization)
+    chat_req = responses_request_to_chat_request(req)
+    if not chat_req.messages:
+        return _openai_error("Missing input for responses request", status_code=422)
+    if chat_req.stream:
+        return _openai_error(
+            "Streaming responses are not supported; set stream=false or use /v1/chat/completions",
+            status_code=400,
+        )
+
+    result = await chat_completions(chat_req, request, authorization)
+    if isinstance(result, (JSONResponse, StreamingResponse)):
+        return result
+    if isinstance(result, dict):
+        return _chat_completion_to_responses(result)
+    return result
+
+
+@app.post("/v1/chat/completions")
+@app.post("/chat/completions")
+async def chat_completions(
+    req: ChatCompletionRequestCompat,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    _check_auth(authorization)
+    try:
+        req = compat_chat_request_to_chat_request(req)
+    except ValueError as e:
+        return _openai_error(str(e), status_code=422)
 
     log_mode = settings.effective_log_mode()
 
@@ -950,6 +1266,31 @@ async def chat_completions(
         if settings.debug_log:
             eff = provider_model or _provider_default_model(provider) or "<default>"
             logger.info("[%s] provider_model effective=%s (client=%s)", resp_id, eff, provider_model or "<none>")
+        req_meta_md, req_meta_plain = _format_request_metadata(
+            req,
+            resolved_model=resolved_model,
+            provider=provider,
+            mode_label=mode_label,
+            reasoning_effort=reasoning_effort,
+            effort_source=effort_source,
+            request_effort_raw=request_effort_raw,
+        )
+        if settings.log_render_markdown:
+            _maybe_print_markdown(resp_id, "REQUEST PARAMS", req_meta_md)
+        else:
+            logger.info("[%s] params %s", resp_id, _truncate_for_log(req_meta_plain))
+        if settings.log_request_curl:
+            payload = req.model_dump(exclude_none=True, mode="json")
+            curl_cmd = _build_curl_command(
+                url=str(request.url),
+                authorization=authorization,
+                payload=payload,
+                stream=bool(req.stream),
+            )
+            if settings.log_render_markdown:
+                _maybe_print_markdown(resp_id, "CURL", f"```bash\n{curl_cmd}\n```")
+            else:
+                logger.info("[%s] curl:\n%s", resp_id, curl_cmd)
         if log_mode == "qa":
             # Collect all user messages (not just the last one)
             user_messages = []
@@ -1677,6 +2018,14 @@ async def chat_completions(
                                         break
 
                                     if msg:
+                                        status = _extract_upstream_status_code(msg) or 500
+                                        logger.error(
+                                            "[%s] stream error status=%d %s",
+                                            resp_id,
+                                            status,
+                                            _truncate_for_log(msg),
+                                        )
+                                        _print_error_panel(resp_id, msg, status)
                                         chunk = {
                                             "id": resp_id,
                                             "object": "chat.completion.chunk",
@@ -1754,6 +2103,10 @@ async def chat_completions(
                                 if delta:
                                     sent_content = True
                                     assembled_text += delta
+                                    if settings.log_stream_inline:
+                                        _stream_inline_append(resp_id, delta)
+                                    elif settings.log_stream_deltas:
+                                        logger.info("[%s] stream delta: %s", resp_id, _inline_log_text(delta))
                                     chunk = {
                                         "id": resp_id,
                                         "object": "chat.completion.chunk",
@@ -1783,6 +2136,8 @@ async def chat_completions(
             finally:
                 if tmpdir is not None:
                     tmpdir.cleanup()
+                if settings.log_stream_inline:
+                    _stream_inline_close(resp_id)
                 assembled = _maybe_strip_answer_tags(assembled_text).strip()
                 duration_ms = int((time.time() - t0) * 1000)
                 
@@ -1790,8 +2145,20 @@ async def chat_completions(
                 _active_requests -= 1
                 _request_stats.record_success(duration_ms, stream_usage)
                 _maybe_print_stats()
-                
-                if log_mode == "qa" and assembled:
+
+                suppress_final = settings.log_stream_inline and settings.log_stream_inline_suppress_final
+                if suppress_final:
+                    _pending_questions.pop(resp_id, None)
+                    if not settings.log_render_markdown:
+                        usage_str = f" usage={stream_usage}" if isinstance(stream_usage, dict) else ""
+                        logger.info(
+                            "[%s] response status=200 duration_ms=%d chars=%d%s",
+                            resp_id,
+                            duration_ms,
+                            len(assembled),
+                            usage_str,
+                        )
+                elif log_mode == "qa" and assembled:
                     # Retrieve stored question and print Q+A together
                     stored_q = _pending_questions.pop(resp_id, "")
                     if not _print_qa_together(resp_id, stored_q, assembled, duration_ms=duration_ms, usage=stream_usage):
