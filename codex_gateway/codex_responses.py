@@ -17,8 +17,9 @@ _OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 _OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 _DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
-_DEFAULT_CODEX_VERSION = "0.21.0"
-_DEFAULT_CODEX_USER_AGENT = "codex_cli_rs/0.50.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+_DEFAULT_CODEX_VERSION = "0.111.0"
+_DEFAULT_CODEX_USER_AGENT = "codex_cli_rs/0.111.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+_INSTALLATION_ID = str(uuid.uuid4())
 
 
 @dataclass(frozen=True)
@@ -173,19 +174,20 @@ def build_codex_headers(
     user_agent: str = _DEFAULT_CODEX_USER_AGENT,
 ) -> dict[str, str]:
     # Match Codex CLI headers (see CLIProxyAPI applyCodexHeaders).
+    sid = session_id or str(uuid.uuid4())
     headers: dict[str, str] = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}",
         "Accept": "text/event-stream",
         "Connection": "Keep-Alive",
-        "Version": version,
-        "Openai-Beta": "responses=experimental",
-        "Session_id": session_id or str(uuid.uuid4()),
+        "version": version,
+        "session_id": sid,
+        "x-client-request-id": sid,
         "User-Agent": user_agent,
+        "originator": "codex_cli_rs",
     }
     if account_id:
-        headers["Originator"] = "codex_cli_rs"
-        headers["Chatgpt-Account-Id"] = account_id
+        headers["chatgpt-account-id"] = account_id
     return headers
 
 
@@ -423,7 +425,11 @@ def convert_chat_completions_to_codex_responses(
         "stream": bool(force_stream),
         "instructions": instructions,
         "input": [],
+        "tools": [],
         "store": False,
+        "prompt_cache_key": _INSTALLATION_ID,
+        "client_metadata": {"x-codex-installation-id": _INSTALLATION_ID},
+        "text": {"verbosity": "low"},
     }
 
     # Map reasoning.effort (OpenAI chat compat accepts `reasoning_effort`).

@@ -14,6 +14,19 @@ _GATEWAY_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_CODEX_CLI_HOME = str(_GATEWAY_ROOT / ".codex-gateway-home")
 
 
+def _codex_bin() -> str:
+    configured = os.environ.get("CODEX_BIN", "").strip()
+    if configured:
+        return configured
+    found = shutil.which("codex")
+    if found:
+        return found
+    for candidate in ("/opt/homebrew/bin/codex", "/usr/local/bin/codex"):
+        if Path(candidate).exists():
+            return candidate
+    return "codex"
+
+
 @dataclass(frozen=True)
 class CodexResult:
     text: str
@@ -93,11 +106,9 @@ def _build_codex_exec_cmd(
 ) -> list[str]:
     # Note: some flags (e.g. `-a/--ask-for-approval`, `--search`) are global and must appear
     # before the `exec` subcommand.
-    cmd: list[str] = ["codex", "-a", approval_policy]
+    cmd: list[str] = [_codex_bin(), "-a", approval_policy]
     if disable_shell_tool:
         cmd.extend(["--disable", "shell_tool"])
-    if disable_view_image_tool:
-        cmd.extend(["--disable", "view_image_tool"])
     if enable_search:
         cmd.append("--search")
 

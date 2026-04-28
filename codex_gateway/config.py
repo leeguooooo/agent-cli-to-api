@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import shlex
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +17,7 @@ GatewayProvider = Literal["auto", "codex", "cursor-agent", "claude", "gemini"]
 
 _GATEWAY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 _DEFAULT_CODEX_CLI_HOME = os.path.join(_GATEWAY_ROOT, ".codex-gateway-home")
+_FALLBACK_CODEX_VERSION = "0.111.0"
 
 
 def _maybe_load_dotenv(path: Path) -> None:
@@ -324,6 +328,34 @@ def _env_json_dict_str_str(name: str) -> dict[str, str]:
     return out
 
 
+def _detect_codex_cli_version() -> str:
+    codex_bin = shutil.which("codex")
+    if not codex_bin:
+        for candidate in ("/opt/homebrew/bin/codex", "/usr/local/bin/codex"):
+            if Path(candidate).exists():
+                codex_bin = candidate
+                break
+    if not codex_bin:
+        return _FALLBACK_CODEX_VERSION
+    try:
+        proc = subprocess.run(
+            [codex_bin, "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except Exception:
+        return _FALLBACK_CODEX_VERSION
+    text = f"{proc.stdout}\n{proc.stderr}"
+    match = re.search(r"\b(\d+\.\d+\.\d+)\b", text)
+    return match.group(1) if match else _FALLBACK_CODEX_VERSION
+
+
+def _default_codex_user_agent(version: str) -> str:
+    return f"codex_cli_rs/{version} (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+
+
 @dataclass(frozen=True)
 class Settings:
     host: str = os.environ.get("CODEX_GATEWAY_HOST", "0.0.0.0")
@@ -370,10 +402,10 @@ class Settings:
         "CODEX_CODEX_BASE_URL",
         "https://chatgpt.com/backend-api/codex",
     )
-    codex_responses_version: str = _env_str("CODEX_CODEX_VERSION", "0.21.0")
+    codex_responses_version: str = _env_str("CODEX_CODEX_VERSION", _detect_codex_cli_version())
     codex_responses_user_agent: str = _env_str(
         "CODEX_CODEX_USER_AGENT",
-        "codex_cli_rs/0.50.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
+        _default_codex_user_agent(codex_responses_version),
     )
     codex_allow_tools: bool = _env_bool("CODEX_CODEX_ALLOW_TOOLS", True)
 
