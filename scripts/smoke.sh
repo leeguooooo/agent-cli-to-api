@@ -3,7 +3,7 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000/v1}"
 TOKEN="${TOKEN:-${CODEX_GATEWAY_TOKEN:-}}"
-MODEL="${MODEL:-gpt-5.4}"
+MODEL="${MODEL:-gpt-5.5}"
 
 declare -a AUTH_ARGS=()
 if [[ -n "${TOKEN}" ]]; then

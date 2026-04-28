@@ -51,7 +51,7 @@ class FileInputTests(unittest.TestCase):
 
     def test_codex_backend_converts_file_parts_to_input_file(self) -> None:
         req = ChatCompletionRequest(
-            model="gpt-5.4",
+            model="gpt-5.5",
             messages=[
                 ChatMessage(
                     role="user",
@@ -65,7 +65,7 @@ class FileInputTests(unittest.TestCase):
 
         payload = convert_chat_completions_to_codex_responses(
             req,
-            model_name="gpt-5.4",
+            model_name="gpt-5.5",
             force_stream=False,
         )
 

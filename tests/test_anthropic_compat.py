@@ -71,7 +71,7 @@ class AnthropicCompatTests(unittest.TestCase):
             {
                 "id": "chatcmpl-demo",
                 "object": "chat.completion",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "choices": [
                     {
                         "index": 0,
@@ -111,15 +111,15 @@ class AnthropicCompatTests(unittest.TestCase):
         async def source():
             yield (
                 'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,'
-                '"model":"gpt-5.4","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'
+                '"model":"gpt-5.5","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'
             )
             yield (
                 'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,'
-                '"model":"gpt-5.4","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\n'
+                '"model":"gpt-5.5","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}]}\n\n'
             )
             yield (
                 'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,'
-                '"model":"gpt-5.4","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+                '"model":"gpt-5.5","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
             )
             yield "data: [DONE]\n\n"
 
@@ -150,7 +150,7 @@ class AnthropicRouteTests(unittest.TestCase):
             return {
                 "id": "chatcmpl-test",
                 "object": "chat.completion",
-                "model": "gpt-5.4",
+                "model": "gpt-5.5",
                 "choices": [
                     {
                         "index": 0,
