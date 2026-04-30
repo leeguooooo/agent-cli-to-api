@@ -27,6 +27,7 @@ class SearchTests(unittest.TestCase):
 
         self.assertIn({"type": "web_search", "external_web_access": True}, payload["tools"])
         self.assertNotEqual(payload.get("tool_choice"), "none")
+        self.assertIn("Sources section", payload["input"][0]["content"][0]["text"])
 
     def test_search_keeps_codex_backend_available(self) -> None:
         self.assertTrue(
@@ -67,6 +68,50 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(
             [item["type"] for item in response["output"]],
             ["web_search_call", "message"],
+        )
+
+    def test_native_response_synthesizes_web_search_url_annotations(self) -> None:
+        async def events():
+            for evt in [
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {"id": "ws_1", "type": "web_search_call", "status": "completed"},
+                },
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 1,
+                    "item": {
+                        "id": "msg_1",
+                        "type": "message",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "annotations": [],
+                                "text": "Source: https://openai.com/index/example.",
+                            }
+                        ],
+                    },
+                },
+                {"type": "response.completed", "response": {"id": "resp_1", "object": "response"}},
+            ]:
+                yield evt
+
+        response = asyncio.run(collect_codex_responses_native_response(events()))
+        annotations = response["output"][1]["content"][0]["annotations"]
+
+        self.assertEqual(
+            annotations,
+            [
+                {
+                    "type": "url_citation",
+                    "start_index": 8,
+                    "end_index": 40,
+                    "url": "https://openai.com/index/example",
+                    "title": "openai.com",
+                }
+            ],
         )
 
     def test_responses_function_call_output_is_forwarded_to_codex_backend(self) -> None:

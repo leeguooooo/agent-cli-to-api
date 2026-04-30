@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Mapping
+from urllib.parse import urlparse
 
 import httpx
 
@@ -20,6 +22,12 @@ _DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _DEFAULT_CODEX_VERSION = "0.111.0"
 _DEFAULT_CODEX_USER_AGENT = "codex_cli_rs/0.111.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
 _INSTALLATION_ID = str(uuid.uuid4())
+_WEB_SEARCH_CITATION_HINT = (
+    "Compatibility instruction: If you use web_search for this request, include a final "
+    "Sources section with 3-5 exact clickable source URLs that you actually used. "
+    "Do not invent URLs. Omit the Sources section if you did not use web_search."
+)
+_URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"']+")
 
 
 @dataclass(frozen=True)
@@ -409,6 +417,14 @@ def _codex_input_file_part(part: dict[str, Any]) -> dict[str, Any] | None:
     return out if len(out) > 1 else None
 
 
+def _web_search_citation_hint_message() -> dict[str, Any]:
+    return {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": _WEB_SEARCH_CITATION_HINT}],
+    }
+
+
 def convert_chat_completions_to_codex_responses(
     req: ChatCompletionRequest,
     *,
@@ -476,6 +492,9 @@ def convert_chat_completions_to_codex_responses(
         out["parallel_tool_calls"] = False
     out["include"] = ["reasoning.encrypted_content"]
 
+    if enable_search:
+        out["input"].append(_web_search_citation_hint_message())
+
     for message in req.messages:
         role = message.role
 
@@ -529,6 +548,80 @@ def convert_chat_completions_to_codex_responses(
             _append_function_calls_from_message(out["input"], message)
 
     return out
+
+
+def _has_web_search_call(response: dict[str, Any]) -> bool:
+    output = response.get("output")
+    if not isinstance(output, list):
+        return False
+    return any(isinstance(item, dict) and item.get("type") == "web_search_call" for item in output)
+
+
+def _trim_url_match(url: str) -> str:
+    while url and url[-1] in ".,;:!?)]}":
+        url = url[:-1]
+    return url
+
+
+def _url_title(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+    host = parsed.netloc or url
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def add_synthetic_web_search_citations(response: dict[str, Any]) -> dict[str, Any]:
+    """
+    ChatGPT Codex backend currently exposes web_search calls but not url_citation
+    annotations. When the model prints URLs in text, synthesize compatible
+    annotations so Responses clients can still render citations.
+    """
+    if not _has_web_search_call(response):
+        return response
+
+    output = response.get("output")
+    if not isinstance(output, list):
+        return response
+
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "output_text":
+                continue
+            existing = part.get("annotations")
+            if isinstance(existing, list) and existing:
+                continue
+            text = part.get("text")
+            if not isinstance(text, str) or "http" not in text:
+                continue
+
+            annotations: list[dict[str, Any]] = []
+            for match in _URL_RE.finditer(text):
+                raw_url = match.group(0)
+                url = _trim_url_match(raw_url)
+                if not url:
+                    continue
+                annotations.append(
+                    {
+                        "type": "url_citation",
+                        "start_index": match.start(),
+                        "end_index": match.start() + len(url),
+                        "url": url,
+                        "title": _url_title(url),
+                    }
+                )
+            if annotations:
+                part["annotations"] = annotations
+
+    return response
 
 
 async def iter_codex_responses_events(
@@ -632,6 +725,7 @@ async def collect_codex_responses_native_response(
             if isinstance(response, dict):
                 if output_items:
                     response["output"] = [output_items[index] for index in sorted(output_items)]
+                add_synthetic_web_search_citations(response)
                 return response
             break
 
