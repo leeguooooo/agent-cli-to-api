@@ -342,6 +342,43 @@ def _resolve_reasoning_effort(req: ChatCompletionRequest) -> str:
     return forced_effort or request_effort or default_effort or "high"
 
 
+def _log_codex_responses_event(resp_id: str, evt: dict) -> None:
+    if not settings.log_events:
+        return
+    t = evt.get("type")
+    if t == "response.created":
+        resp = evt.get("response") or {}
+        rid = resp.get("id") if isinstance(resp, dict) else None
+        logger.info("[%s] codex %s response_id=%s", resp_id, t, rid)
+        return
+    if t == "response.completed":
+        resp = evt.get("response") or {}
+        usage = resp.get("usage") if isinstance(resp, dict) else None
+        extra = f" usage={usage}" if isinstance(usage, dict) else ""
+        logger.info("[%s] codex %s%s", resp_id, t, extra)
+        return
+    if t == "response.output_text.done":
+        text = evt.get("text") or ""
+        logger.info("[%s] codex %s chars=%d", resp_id, t, len(str(text)))
+        return
+    if t in {
+        "response.web_search_call.in_progress",
+        "response.web_search_call.searching",
+        "response.web_search_call.completed",
+    }:
+        logger.info("[%s] codex %s item_id=%s", resp_id, t, evt.get("item_id"))
+        return
+    if t in {"response.output_item.added", "response.output_item.done"}:
+        item = evt.get("item") or {}
+        itype = item.get("type") if isinstance(item, dict) else None
+        if itype == "web_search_call":
+            action = item.get("action") if isinstance(item, dict) else None
+            logger.info("[%s] codex %s item_type=%s action=%s", resp_id, t, itype, action)
+            return
+        logger.info("[%s] codex %s item_type=%s", resp_id, t, itype)
+        return
+
+
 def _check_auth(authorization: str | None) -> None:
     token = settings.bearer_token
     if not token:
@@ -1520,6 +1557,12 @@ async def responses(
             reasoning_effort = _resolve_reasoning_effort(chat_req)
             codex_session_id = _extract_codex_session_id(chat_req, request)
             response_headers: dict[str, str] = {}
+            resp_id = f"respapi-{uuid.uuid4().hex}"
+            prompt = _maybe_inject_automation_guard(messages_to_prompt(chat_req.messages))
+            if settings.debug_log:
+                logger.info("[%s] provider_model effective=%s (client=%s)", resp_id, codex_model, provider_model or "<none>")
+            if settings.effective_log_mode() == "full":
+                logger.info("[%s] PROMPT:\n%s", resp_id, _truncate_for_log(prompt))
 
             async def _run_native_responses_once() -> dict:
                 auth = load_codex_auth(codex_cli_home=settings.codex_cli_home)
@@ -1556,6 +1599,7 @@ async def responses(
                     headers=headers,
                     payload=payload,
                     timeout_seconds=settings.timeout_seconds,
+                    event_callback=lambda evt: _log_codex_responses_event(resp_id, evt),
                     response_headers_cb=_capture_headers,
                 )
                 return await collect_codex_responses_native_response(events)
@@ -1880,20 +1924,8 @@ async def chat_completions(
             if not settings.log_events:
                 return
             t = evt.get("type")
-            if t == "response.created":
-                resp = evt.get("response") or {}
-                rid = resp.get("id") if isinstance(resp, dict) else None
-                logger.info("[%s] codex %s response_id=%s", resp_id, t, rid)
-                return
-            if t == "response.completed":
-                resp = evt.get("response") or {}
-                usage = resp.get("usage") if isinstance(resp, dict) else None
-                extra = f" usage={usage}" if isinstance(usage, dict) else ""
-                logger.info("[%s] codex %s%s", resp_id, t, extra)
-                return
-            if t == "response.output_text.done":
-                text = evt.get("text") or ""
-                logger.info("[%s] codex %s chars=%d", resp_id, t, len(str(text)))
+            if isinstance(t, str) and t.startswith("response."):
+                _log_codex_responses_event(resp_id, evt)
                 return
             if t == "thread.started":
                 logger.info("[%s] codex %s thread_id=%s", resp_id, t, evt.get("thread_id"))
