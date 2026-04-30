@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -126,6 +127,17 @@ def _coerce_responses_content(content: Any) -> Any:
     return str(content)
 
 
+def _coerce_tool_output(output: Any) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, str):
+        return output
+    try:
+        return json.dumps(output, ensure_ascii=False)
+    except Exception:
+        return str(output)
+
+
 def responses_input_to_messages(input_obj: Any) -> list[ChatMessage]:
     messages: list[ChatMessage] = []
 
@@ -143,6 +155,36 @@ def responses_input_to_messages(input_obj: Any) -> list[ChatMessage]:
             return
         role = item.get("role")
         item_type = item.get("type")
+        if item_type == "function_call":
+            call_id = item.get("call_id") or item.get("id")
+            name = item.get("name")
+            arguments = item.get("arguments")
+            if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:
+                return
+            if not isinstance(arguments, str):
+                try:
+                    arguments = json.dumps(arguments or {}, ensure_ascii=False)
+                except Exception:
+                    arguments = "{}"
+            _add(
+                "assistant",
+                "",
+            )
+            messages[-1].model_extra["tool_calls"] = [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }
+            ]
+            return
+        if item_type == "function_call_output":
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                return
+            _add("tool", _coerce_tool_output(item.get("output")))
+            messages[-1].model_extra["tool_call_id"] = call_id
+            return
         if item_type == "message" or isinstance(role, str):
             role = role if isinstance(role, str) else "user"
             _add(role, _coerce_responses_content(item.get("content")))

@@ -6,7 +6,7 @@ from codex_gateway.codex_responses import (
     convert_chat_completions_to_codex_responses,
 )
 from codex_gateway.config import Settings
-from codex_gateway.openai_compat import ChatCompletionRequest, ChatMessage
+from codex_gateway.openai_compat import ChatCompletionRequest, ChatMessage, responses_input_to_messages
 from codex_gateway.server import _should_use_codex_backend
 
 
@@ -67,6 +67,55 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(
             [item["type"] for item in response["output"]],
             ["web_search_call", "message"],
+        )
+
+    def test_responses_function_call_output_is_forwarded_to_codex_backend(self) -> None:
+        messages = responses_input_to_messages(
+            [
+                {"type": "message", "role": "user", "content": "search KB"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "lookup_kb_items",
+                    "arguments": "{\"query\":\"web search\"}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "{\"items\":[{\"title\":\"Web Search\",\"url\":\"https://example.test\"}]}",
+                },
+            ]
+        )
+
+        self.assertEqual([msg.role for msg in messages], ["user", "assistant", "tool"])
+        self.assertEqual(messages[1].model_extra["tool_calls"][0]["id"], "call_123")
+        self.assertEqual(messages[2].model_extra["tool_call_id"], "call_123")
+
+        payload = convert_chat_completions_to_codex_responses(
+            ChatCompletionRequest(model="gpt-5.5", messages=messages),
+            model_name="gpt-5.5",
+            force_stream=True,
+            allow_tools=True,
+        )
+
+        function_items = [
+            item for item in payload["input"] if item.get("type") in {"function_call", "function_call_output"}
+        ]
+        self.assertEqual(
+            function_items,
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "lookup_kb_items",
+                    "arguments": "{\"query\":\"web search\"}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": "{\"items\":[{\"title\":\"Web Search\",\"url\":\"https://example.test\"}]}",
+                },
+            ],
         )
 
 
