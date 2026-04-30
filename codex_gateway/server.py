@@ -342,6 +342,42 @@ def _resolve_reasoning_effort(req: ChatCompletionRequest) -> str:
     return forced_effort or request_effort or default_effort or "high"
 
 
+def _codex_response_usage_for_openai(response: dict) -> dict[str, object] | None:
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return None
+    prompt_tokens = int(usage.get("input_tokens") or 0)
+    completion_tokens = int(usage.get("output_tokens") or 0)
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "prompt_tokens_details": usage.get("input_tokens_details")
+        if isinstance(usage.get("input_tokens_details"), dict)
+        else {},
+        "completion_tokens_details": usage.get("output_tokens_details")
+        if isinstance(usage.get("output_tokens_details"), dict)
+        else {},
+    }
+
+
+def _codex_response_output_text(response: dict) -> str:
+    chunks: list[str] = []
+    output = response.get("output")
+    if not isinstance(output, list):
+        return ""
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                chunks.append(part["text"])
+    return "".join(chunks)
+
+
 def _log_codex_responses_event(resp_id: str, evt: dict) -> None:
     if not settings.log_events:
         return
@@ -1530,6 +1566,7 @@ async def responses(
     request: Request,
     authorization: str | None = Header(default=None),
 ):
+    global _active_requests
     _check_auth(authorization)
     chat_req = responses_request_to_chat_request(req)
     if not chat_req.messages:
@@ -1555,12 +1592,53 @@ async def responses(
         if use_codex_backend:
             codex_model = provider_model or settings.default_model
             reasoning_effort = _resolve_reasoning_effort(chat_req)
+            request_effort_raw = _extract_reasoning_effort(chat_req)
+            forced_effort = _normalize_reasoning_effort((settings.force_reasoning_effort or "").strip() or None)
+            request_effort = _normalize_reasoning_effort(request_effort_raw)
+            default_effort = _normalize_reasoning_effort((settings.model_reasoning_effort or "").strip() or None)
+            effort_source = "default"
+            if forced_effort:
+                effort_source = "forced"
+            elif request_effort:
+                effort_source = "request"
+            elif not default_effort:
+                effort_source = "fallback"
             codex_session_id = _extract_codex_session_id(chat_req, request)
             response_headers: dict[str, str] = {}
             resp_id = f"respapi-{uuid.uuid4().hex}"
+            t0 = time.time()
             prompt = _maybe_inject_automation_guard(messages_to_prompt(chat_req.messages))
+            _active_requests += 1
+            if settings.log_render_markdown:
+                _print_separator(resp_id, "codex/codex-responses", model=codex_model)
+            else:
+                logger.info("[%s] ▶ model=%s provider=codex mode=codex-responses stream=false", resp_id, codex_model)
             if settings.debug_log:
                 logger.info("[%s] provider_model effective=%s (client=%s)", resp_id, codex_model, provider_model or "<none>")
+            req_meta_md, req_meta_plain = _format_request_metadata(
+                chat_req,
+                resolved_model=codex_model,
+                provider="codex",
+                mode_label="codex-responses",
+                reasoning_effort=reasoning_effort,
+                effort_source=effort_source,
+                request_effort_raw=request_effort_raw,
+            )
+            if settings.log_render_markdown:
+                _maybe_print_markdown(resp_id, "REQUEST PARAMS", req_meta_md)
+            else:
+                logger.info("[%s] params %s", resp_id, _truncate_for_log(req_meta_plain))
+            if settings.log_request_curl:
+                curl_cmd = _build_curl_command(
+                    url=str(request.url),
+                    authorization=authorization,
+                    payload=req.model_dump(exclude_none=True, mode="json"),
+                    stream=False,
+                )
+                if settings.log_render_markdown:
+                    _maybe_print_markdown(resp_id, "CURL", f"```bash\n{curl_cmd}\n```")
+                else:
+                    logger.info("[%s] curl:\n%s", resp_id, curl_cmd)
             if settings.effective_log_mode() == "full":
                 logger.info("[%s] PROMPT:\n%s", resp_id, _truncate_for_log(prompt))
 
@@ -1618,10 +1696,28 @@ async def responses(
                         else:
                             raise
             except Exception as e:
+                _active_requests -= 1
+                _request_stats.record_failure()
+                _print_error_panel(resp_id, str(e), status_code=502)
                 return _openai_error(str(e), status_code=502)
 
             if "object" not in native_response:
                 native_response["object"] = "response"
+            duration_ms = int((time.time() - t0) * 1000)
+            usage = _codex_response_usage_for_openai(native_response)
+            text = _maybe_strip_answer_tags(_codex_response_output_text(native_response)).strip()
+            _active_requests -= 1
+            _request_stats.record_success(duration_ms, usage)  # type: ignore[arg-type]
+            _maybe_print_stats()
+            log_mode = settings.effective_log_mode()
+            if log_mode == "full" and text:
+                if not _maybe_print_markdown(resp_id, "RESPONSE", text, duration_ms=duration_ms, usage=usage):  # type: ignore[arg-type]
+                    usage_str = f" usage={usage}" if isinstance(usage, dict) else ""
+                    logger.info("[%s] response status=200 duration_ms=%d chars=%d%s", resp_id, duration_ms, len(text), usage_str)
+                    logger.info("[%s] RESPONSE:\n%s", resp_id, _truncate_for_log(text))
+            elif not settings.log_render_markdown:
+                usage_str = f" usage={usage}" if isinstance(usage, dict) else ""
+                logger.info("[%s] response status=200 duration_ms=%d chars=%d%s", resp_id, duration_ms, len(text), usage_str)
             return JSONResponse(content=native_response, headers=response_headers)
 
     result = await chat_completions(chat_req, request, authorization)
