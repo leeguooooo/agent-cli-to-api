@@ -387,7 +387,7 @@ class Settings:
     sandbox: SandboxMode = os.environ.get("CODEX_SANDBOX", "read-only")  # type: ignore[assignment]
     approval_policy: ApprovalPolicy = os.environ.get("CODEX_APPROVAL_POLICY", "never")  # type: ignore[assignment]
     skip_git_repo_check: bool = _env_bool("CODEX_SKIP_GIT_REPO_CHECK", True)
-    enable_search: bool = _env_bool("CODEX_ENABLE_SEARCH", False)
+    enable_search: bool = _env_bool("CODEX_ENABLE_SEARCH", True)
     add_dirs: list[str] = field(default_factory=lambda: _env_csv("CODEX_ADD_DIRS"))
     model_aliases: dict[str, str] = field(default_factory=lambda: _env_json_dict_str_str("CODEX_MODEL_ALIASES"))
     advertised_models: list[str] = field(default_factory=lambda: _env_csv("CODEX_ADVERTISED_MODELS"))

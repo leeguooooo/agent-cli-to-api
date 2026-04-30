@@ -286,8 +286,25 @@ def _looks_like_unsupported_model_error(message: str) -> bool:
     return ("model is not supported" in lowered) or ("not supported when using codex" in lowered)
 
 
-def _requires_codex_cli_backend(model: str | None) -> bool:
-    return (model or "").strip().lower().startswith("gpt-5.5")
+def _should_use_codex_backend(
+    *,
+    provider: str,
+    use_codex_responses_api: bool,
+    enable_image_input: bool,
+    has_image_urls: bool,
+    has_file_inputs: bool,
+    stream: bool,
+) -> bool:
+    return bool(
+        provider == "codex"
+        and (
+            use_codex_responses_api
+            or (enable_image_input and has_image_urls)
+            or has_file_inputs
+            # Prefer Codex backend `/responses` for streaming requests (true SSE deltas).
+            or stream
+        )
+    )
 
 
 def _check_auth(authorization: str | None) -> None:
@@ -1365,6 +1382,7 @@ async def debug_config(authorization: str | None = Header(default=None)):
         "gemini_oauth_client_id": settings.gemini_oauth_client_id,
         "model_reasoning_effort": settings.model_reasoning_effort,
         "force_reasoning_effort": settings.force_reasoning_effort,
+        "enable_search": settings.enable_search,
         "use_codex_responses_api": settings.use_codex_responses_api,
         "codex_cli_home": settings.codex_cli_home,
         "workspace": settings.workspace,
@@ -1603,17 +1621,13 @@ async def chat_completions(
     file_inputs = extract_file_inputs(req.messages)
     use_claude_oauth = bool(provider == "claude" and settings.claude_use_oauth_api)
     use_gemini_cloudcode = bool(provider == "gemini" and settings.gemini_use_cloudcode_api)
-    codex_effective_model = (provider_model or settings.default_model) if provider == "codex" else None
-    use_codex_backend = bool(
-        provider == "codex"
-        and not _requires_codex_cli_backend(codex_effective_model)
-        and (
-            settings.use_codex_responses_api
-            or (settings.enable_image_input and image_urls)
-            or bool(file_inputs)
-            # Prefer Codex backend `/responses` for streaming requests (true SSE deltas).
-            or req.stream
-        )
+    use_codex_backend = _should_use_codex_backend(
+        provider=provider,
+        use_codex_responses_api=settings.use_codex_responses_api,
+        enable_image_input=settings.enable_image_input,
+        has_image_urls=bool(image_urls),
+        has_file_inputs=bool(file_inputs),
+        stream=req.stream,
     )
 
     sem = _get_semaphore()
@@ -1891,6 +1905,7 @@ async def chat_completions(
                                         "high" if reasoning_effort == "xhigh" else reasoning_effort
                                     ),
                                     allow_tools=settings.codex_allow_tools,
+                                    enable_search=settings.enable_search,
                                 )
                                 events = iter_codex_responses_events(
                                     base_url=settings.codex_responses_base_url,
@@ -2233,6 +2248,7 @@ async def chat_completions(
                                         "high" if reasoning_effort == "xhigh" else reasoning_effort
                                     ),
                                     allow_tools=settings.codex_allow_tools,
+                                    enable_search=settings.enable_search,
                                 )
                                 events = iter_codex_responses_events(
                                     base_url=settings.codex_responses_base_url,

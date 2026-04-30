@@ -131,6 +131,9 @@ Use `CODEX_PROVIDER=auto` and select providers per-request by prefixing `model`:
 
 ### Codex backend options
 
+- Web search is enabled by default for the Codex backend API (`CODEX_ENABLE_SEARCH=1`).
+  The gateway adds the native Responses `web_search` tool to Codex `/responses`
+  requests.
 - `CODEX_CODEX_ALLOW_TOOLS=0` to disable Codex backend tool calls (default: enabled).
 - OpenAI `tools`/`tool_choice` are mapped for Codex backend, Claude OAuth, and Gemini CloudCode (best-effort).
 

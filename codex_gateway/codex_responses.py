@@ -416,6 +416,7 @@ def convert_chat_completions_to_codex_responses(
     force_stream: bool,
     reasoning_effort_override: str | None = None,
     allow_tools: bool = False,
+    enable_search: bool = False,
 ) -> dict[str, Any]:
     instructions = codex_instructions_for_model(model_name)
 
@@ -459,7 +460,14 @@ def convert_chat_completions_to_codex_responses(
         if parallel_tool_calls is not None:
             out["parallel_tool_calls"] = parallel_tool_calls
 
-    if not allow_tools:
+    if enable_search:
+        tools = out["tools"]
+        if isinstance(tools, list) and not any(
+            isinstance(tool, dict) and tool.get("type") == "web_search" for tool in tools
+        ):
+            tools.append({"type": "web_search", "external_web_access": True})
+
+    if not allow_tools and not enable_search:
         # For proxying chat completions / UI automation, we generally want pure text output.
         # Codex backend can otherwise attempt MCP/tool calls (which are not available here),
         # leading to noisy logs and occasional refusals. Users who need tools should use
