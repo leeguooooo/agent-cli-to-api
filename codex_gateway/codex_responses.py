@@ -616,6 +616,28 @@ async def collect_codex_responses_text_and_usage(
     return "".join(chunks), usage, tool_calls
 
 
+async def collect_codex_responses_native_response(
+    events: AsyncIterator[dict[str, Any]],
+) -> dict[str, Any]:
+    output_items: dict[int, dict[str, Any]] = {}
+
+    async for evt in events:
+        if evt.get("type") in {"response.output_item.added", "response.output_item.done"}:
+            item = evt.get("item")
+            output_index = evt.get("output_index")
+            if isinstance(item, dict) and isinstance(output_index, int):
+                output_items[output_index] = item
+        if evt.get("type") == "response.completed":
+            response = evt.get("response")
+            if isinstance(response, dict):
+                if output_items:
+                    response["output"] = [output_items[index] for index in sorted(output_items)]
+                return response
+            break
+
+    raise RuntimeError("codex responses failed: missing response.completed payload")
+
+
 async def stream_codex_responses_deltas_with_keepalive(
     *,
     base_url: str,

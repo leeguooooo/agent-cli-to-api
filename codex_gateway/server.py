@@ -31,6 +31,7 @@ from .anthropic_compat import (
 )
 from .codex_responses import (
     build_codex_headers,
+    collect_codex_responses_native_response,
     collect_codex_responses_text_and_usage,
     convert_chat_completions_to_codex_responses,
     extract_codex_usage_headers,
@@ -305,6 +306,40 @@ def _should_use_codex_backend(
             or stream
         )
     )
+
+
+def _resolve_request_provider(req: ChatCompletionRequest) -> tuple[str, str | None, str]:
+    forced_provider = _normalize_provider(settings.provider)
+    fallback_model = (
+        _provider_default_model(forced_provider if forced_provider != "auto" else "codex") or settings.default_model
+    )
+    client_model = (req.model or "").strip()
+    client_model_ignored = bool(forced_provider != "auto" and not settings.allow_client_model_override)
+    requested_model = (fallback_model if client_model_ignored else (client_model or fallback_model)).strip()
+    resolved_model = settings.model_aliases.get(requested_model, requested_model)
+    parsed_provider, provider_model = _parse_provider_model(resolved_model)
+    if settings.allow_client_provider_override or forced_provider == "auto":
+        provider = parsed_provider
+    else:
+        provider = forced_provider
+        if not settings.allow_client_model_override:
+            provider_model = None
+    return provider, provider_model, requested_model
+
+
+def _normalize_reasoning_effort(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    if raw == "none":
+        return "low"
+    return raw if raw in {"low", "medium", "high", "xhigh"} else None
+
+
+def _resolve_reasoning_effort(req: ChatCompletionRequest) -> str:
+    request_effort = _normalize_reasoning_effort(_extract_reasoning_effort(req))
+    forced_effort = _normalize_reasoning_effort((settings.force_reasoning_effort or "").strip() or None)
+    default_effort = _normalize_reasoning_effort((settings.model_reasoning_effort or "").strip() or None)
+    return forced_effort or request_effort or default_effort or "high"
 
 
 def _check_auth(authorization: str | None) -> None:
@@ -1467,6 +1502,83 @@ async def responses(
             "Streaming responses are not supported; set stream=false or use /v1/chat/completions",
             status_code=400,
         )
+
+    provider, provider_model, _requested_model = _resolve_request_provider(chat_req)
+    if provider == "codex":
+        image_urls = extract_image_urls(chat_req.messages)
+        file_inputs = extract_file_inputs(chat_req.messages)
+        use_codex_backend = _should_use_codex_backend(
+            provider=provider,
+            use_codex_responses_api=settings.use_codex_responses_api,
+            enable_image_input=settings.enable_image_input,
+            has_image_urls=bool(image_urls),
+            has_file_inputs=bool(file_inputs),
+            stream=chat_req.stream,
+        )
+        if use_codex_backend:
+            codex_model = provider_model or settings.default_model
+            reasoning_effort = _resolve_reasoning_effort(chat_req)
+            codex_session_id = _extract_codex_session_id(chat_req, request)
+            response_headers: dict[str, str] = {}
+
+            async def _run_native_responses_once() -> dict:
+                auth = load_codex_auth(codex_cli_home=settings.codex_cli_home)
+                token = auth.api_key or auth.access_token
+                if not token:
+                    raise RuntimeError("Missing Codex auth token (run `codex login` to create ~/.codex/auth.json).")
+                headers = build_codex_headers(
+                    token=token,
+                    account_id=auth.account_id,
+                    session_id=codex_session_id,
+                    version=settings.codex_responses_version,
+                    user_agent=settings.codex_responses_user_agent,
+                )
+                backend_req = chat_req.model_copy(
+                    update={
+                        "model": codex_model,
+                        "messages": _maybe_inject_automation_guard_messages(chat_req.messages),
+                    }
+                )
+                payload = convert_chat_completions_to_codex_responses(
+                    backend_req,
+                    model_name=codex_model,
+                    force_stream=True,
+                    reasoning_effort_override=("high" if reasoning_effort == "xhigh" else reasoning_effort),
+                    allow_tools=settings.codex_allow_tools,
+                    enable_search=settings.enable_search,
+                )
+
+                def _capture_headers(headers: dict[str, str]) -> None:
+                    response_headers.update(extract_codex_usage_headers(headers))
+
+                events = iter_codex_responses_events(
+                    base_url=settings.codex_responses_base_url,
+                    headers=headers,
+                    payload=payload,
+                    timeout_seconds=settings.timeout_seconds,
+                    response_headers_cb=_capture_headers,
+                )
+                return await collect_codex_responses_native_response(events)
+
+            try:
+                async with _get_semaphore():
+                    try:
+                        native_response = await _run_native_responses_once()
+                    except Exception as e:
+                        if "codex responses failed: 401" in str(e) or "codex responses failed: 403" in str(e):
+                            await maybe_refresh_codex_auth(
+                                codex_cli_home=settings.codex_cli_home,
+                                timeout_seconds=min(settings.timeout_seconds, 30),
+                            )
+                            native_response = await _run_native_responses_once()
+                        else:
+                            raise
+            except Exception as e:
+                return _openai_error(str(e), status_code=502)
+
+            if "object" not in native_response:
+                native_response["object"] = "response"
+            return JSONResponse(content=native_response, headers=response_headers)
 
     result = await chat_completions(chat_req, request, authorization)
     if isinstance(result, (JSONResponse, StreamingResponse)):

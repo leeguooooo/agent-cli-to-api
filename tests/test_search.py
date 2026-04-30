@@ -1,6 +1,10 @@
+import asyncio
 import unittest
 
-from codex_gateway.codex_responses import convert_chat_completions_to_codex_responses
+from codex_gateway.codex_responses import (
+    collect_codex_responses_native_response,
+    convert_chat_completions_to_codex_responses,
+)
 from codex_gateway.config import Settings
 from codex_gateway.openai_compat import ChatCompletionRequest, ChatMessage
 from codex_gateway.server import _should_use_codex_backend
@@ -34,6 +38,35 @@ class SearchTests(unittest.TestCase):
                 has_file_inputs=True,
                 stream=True,
             )
+        )
+
+    def test_native_responses_preserves_web_search_output_items(self) -> None:
+        async def events():
+            for evt in [
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {"id": "ws_1", "type": "web_search_call", "status": "in_progress"},
+                },
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": {"id": "ws_1", "type": "web_search_call", "status": "completed"},
+                },
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 1,
+                    "item": {"id": "msg_1", "type": "message", "status": "completed"},
+                },
+                {"type": "response.completed", "response": {"id": "resp_1", "object": "response"}},
+            ]:
+                yield evt
+
+        response = asyncio.run(collect_codex_responses_native_response(events()))
+
+        self.assertEqual(
+            [item["type"] for item in response["output"]],
+            ["web_search_call", "message"],
         )
 
 
