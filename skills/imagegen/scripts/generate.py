@@ -47,6 +47,9 @@ def _post(base_url: str, token: str, body: dict, timeout: int) -> dict:
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {token}",
+            # Cloudflare (in front of a remote gateway) returns 403 / error 1010 to
+            # the default Python-urllib UA. Send an explicit one.
+            "User-Agent": "codex-api-imagegen/1.0",
         },
         method="POST",
     )

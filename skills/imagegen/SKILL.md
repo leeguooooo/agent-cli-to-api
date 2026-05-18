@@ -125,8 +125,9 @@ Output (stdout): `assets/brand/leaf-icon.png`
 | --- | --- | --- |
 | `failed to reach gateway` | gateway not running | start it (see Prerequisites) |
 | HTTP 401 `Missing Authorization` | wrong/missing token | set `CODEX_API_TOKEN` or `--token` |
-| HTTP 400 `requires a newer version of Codex` | gateway running an old `version` header | upgrade local `codex` CLI: `npm i -g @openai/codex@latest` |
-| HTTP 500 `env: node: No such file` | gateway falling back to `codex exec` subprocess | confirm `CODEX_USE_CODEX_RESPONSES_API=1` |
+| HTTP 403 `error code: 1010` | Cloudflare in front of the gateway is blocking the request | the script already sets a User-Agent; if you removed it, restore it. Also confirm the gateway hostname is in your CF allowlist. |
+| HTTP 400 `requires a newer version of Codex` | gateway is sending `version: 0.111.0` because it can't detect the local codex CLI version | **server-side fix**: pull the latest codex-api (commit `fbf9316` or newer reads `~/.codex/version.json`), or ensure `codex --version` succeeds in the gateway's environment (launchd PATH must reach `node` for the codex shim). Bumping the local `codex` CLI alone does not help if detection still fails. |
+| HTTP 500 `env: node: No such file` | gateway falling back to `codex exec` subprocess | confirm `CODEX_USE_CODEX_RESPONSES_API=1` (default in current codex-api) |
 | `Model did not return an image` | model returned text only | rephrase prompt to explicitly say "use the image_generation tool" |
 | HTTP 429 / quota errors | subscription rate-limited | wait, or switch to API-key path (`gpt-image-2` direct) |
 
