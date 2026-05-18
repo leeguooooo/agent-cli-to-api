@@ -7,7 +7,7 @@ Works great as a local gateway (localhost) or behind a reverse proxy.
 Think of it as **LiteLLM for agent CLIs**: you point existing OpenAI SDKs/tools at `base_url`, and choose a backend by `model`.
 
 Supported backends:
-- **OpenAI Codex** - defaults to backend `/responses` for vision; falls back to `codex exec`
+- **OpenAI Codex** - defaults to backend `/responses` for vision and **image generation** (DALL-E / `gpt-image`-class output); falls back to `codex exec`
 - **Cursor Agent** - via `cursor-agent` CLI
 - **Claude Code** - via CLI or **direct API** (auto-detects `~/.claude/settings.json` config)
 - **Gemini** - via CLI or CloudCode direct (set `GEMINI_USE_CLOUDCODE_API=1`)
@@ -15,6 +15,7 @@ Supported backends:
 Why this exists:
 - Many tools/SDKs only speak the OpenAI API (`/v1/chat/completions`) - this lets you plug agent CLIs into that ecosystem.
 - One gateway, multiple CLIs: pick a backend by `model` (with optional prefixes like `cursor:` / `claude:` / `gemini:`).
+- **Expose your ChatGPT Plus / Pro subscription's image generation as an HTTP API.** No `OPENAI_API_KEY` required — the gateway reuses the OAuth token from `codex login`, lets you call `image_generation` via plain chat completions, and returns the PNG inline (data URI). See [Image generation (ChatGPT subscription)](#image-generation-chatgpt-subscription).
 
 ## Table of Contents
 
@@ -23,6 +24,7 @@ Why this exists:
 - [Run (No `.env` Needed)](#run-no-env-needed)
 - [Core Configuration](#core-configuration)
 - [API](#api)
+- [Image generation (ChatGPT subscription)](#image-generation-chatgpt-subscription)
 - [OpenAI SDK examples](#openai-sdk-examples)
 - [Security notes](#security-notes)
 - [Logging & Performance Diagnosis](#logging--performance-diagnosis)
@@ -312,6 +314,92 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
   -d @/tmp/pdf-payload.json
 ```
 
+## Image generation (ChatGPT subscription)
+
+> **TL;DR** — turn your ChatGPT Plus / Pro / Team subscription into an OpenAI-compatible image-generation HTTP API. No `OPENAI_API_KEY`, no per-image billing on top of your subscription, no separate `/v1/images/generations` upstream. Just call `/v1/chat/completions` and the gateway hands you back a PNG.
+
+### How it works
+
+The Codex CLI's built-in `image_gen` capability is implemented as a native **Responses API tool** (`{"type": "image_generation"}`) hosted on ChatGPT's internal `backend-api/codex` endpoint — and your `~/.codex/auth.json` OAuth token is what authorises it. This gateway:
+
+1. Reuses that OAuth token (no API key needed).
+2. Injects `{"type": "image_generation"}` into the `tools` array on every chat completion request when `CODEX_ENABLE_IMAGE_GEN=1` (default).
+3. Streams the upstream Responses events, intercepts the `image_generation_call` output items, and embeds the resulting base64 PNG into the assistant message content as a markdown data URI: `![](data:image/png;base64,…)`.
+4. Returns a standard OpenAI Chat Completion response — any client that understands the OpenAI SDK gets the image for free.
+
+### Requirements
+
+- Logged-in Codex CLI (`codex login` once — creates `~/.codex/auth.json`).
+- `CODEX_USE_CODEX_RESPONSES_API=1` (this is the default).
+- `CODEX_ENABLE_IMAGE_GEN=1` (this is the default; set to `0` to disable).
+
+### Example (curl)
+
+```bash
+curl -sS http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer devtoken" \
+  -d '{
+    "model": "gpt-5.5",
+    "stream": false,
+    "messages": [
+      {"role": "user",
+       "content": "Use the image_generation tool to draw a minimal flat-design icon of a green leaf on white, 1024x1024."}
+    ]
+  }' | jq -r '.choices[0].message.content' \
+  | python3 -c "import sys,re,base64; m=re.search(r'data:image/(\w+);base64,([A-Za-z0-9+/=]+)', sys.stdin.read()); open(f'leaf.{m.group(1)}','wb').write(base64.b64decode(m.group(2)))"
+```
+
+The script above pipes the data URI out and writes `leaf.png`.
+
+### Example (OpenAI SDK — Python)
+
+```python
+import base64, re
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="devtoken")
+resp = client.chat.completions.create(
+    model="gpt-5.5",
+    messages=[{"role": "user", "content": "Use the image_generation tool to render a watercolour cat."}],
+)
+m = re.search(r"data:image/(\w+);base64,([A-Za-z0-9+/=]+)", resp.choices[0].message.content)
+open(f"cat.{m.group(1)}", "wb").write(base64.b64decode(m.group(2)))
+```
+
+### Bundled helper / agent skill
+
+A turnkey CLI helper for any agent (Claude Code, Codex, Cursor, your own scripts) ships in this repo:
+
+```bash
+python3 skills/imagegen/scripts/generate.py \
+  "Studio photo of a red ceramic teacup on a wooden table, soft morning light" \
+  -o assets/hero.png \
+  --size 1536x1024 \
+  --quiet
+# stdout = assets/hero.png  (the agent can capture and use it)
+```
+
+Drop the `skills/imagegen/` directory into any agent's skill directory (or symlink it). The accompanying [`SKILL.md`](./skills/imagegen/SKILL.md) gives agents everything they need: when to use it, sizing recipes, save-path policy, error handling, and known limits.
+
+### Supported / unsupported parameters
+
+| Param | Status | Notes |
+| --- | --- | --- |
+| `size` | ✅ honoured | `auto`, `1024x1024`, `1536x1024`, `1024x1536`, `2048x2048`, `3840x2160`, … |
+| `output_format` | ✅ honoured | `png` (default), `jpeg`, `webp` |
+| `quality: low/medium/auto` | ✅ honoured | model picks `medium` by default |
+| `quality: high` | ⚠️ silently downgraded to `medium` | ChatGPT subscription tier cap — use `OPENAI_API_KEY` and direct `/v1/images/generations` for true high |
+| `background: transparent` | ❌ not supported on subscription path | requires `gpt-image-1.5` via `OPENAI_API_KEY`; or use chroma-key + local alpha extraction |
+| `model` (e.g. `gpt-image-2`) | passthrough | hosted model is whatever the subscription provides; modern subscription serves `gpt-image-2`-class output |
+| Edits (`/v1/images/edits`) | ❌ not yet exposed | open issue if you need it |
+
+### Quotas and fair use
+
+- Calls consume your ChatGPT subscription image quota — **shared with the ChatGPT web app and Codex CLI**.
+- One image typically takes **15–40 seconds** at default quality.
+- This is a *thin* gateway, not a "free image API for everyone" — it's meant for personal automation, agent workflows, and dogfooding from your own developer machine. Putting it behind a public proxy violates OpenAI's ToS for your subscription. Use a token (`CODEX_GATEWAY_TOKEN`) and bind to `127.0.0.1`.
+
 ## OpenAI SDK examples
 
 Python:
@@ -467,3 +555,8 @@ uv run agent-cli-to-api codex
 ## Keywords (SEO)
 
 OpenAI-compatible API, chat completions, SSE streaming, agent gateway, CLI to API proxy, Codex CLI, Cursor Agent, Claude Code, Gemini CLI.
+
+**Image generation specifically:**
+ChatGPT subscription image generation API, ChatGPT Plus image API, ChatGPT Pro image API, use ChatGPT image generation without OPENAI_API_KEY, expose ChatGPT image generation as HTTP API, gpt-image-1 / gpt-image-2 via ChatGPT subscription, Codex CLI image_gen as API, DALL-E via ChatGPT Plus subscription, no-API-key image generation proxy, OAuth-backed OpenAI image generation, /v1/chat/completions image_generation tool, Responses API image_generation tool, image_generation_call SSE events, ChatGPT subscription as image API gateway, free-tier-friendly image generation gateway, agent skill for image generation, save generated image to project directory.
+
+**中文搜索词：** 用 ChatGPT 订阅生成图片接口、ChatGPT Plus 生图 API、不用 API key 生成图片、把 ChatGPT 订阅做成 OpenAI 兼容生图接口、ChatGPT 订阅生图代理、Codex CLI 生图能力接口化、gpt-image-2 用订阅调用、ChatGPT Plus 生图转 API、image_generation 工具网关、给 agent 用的生图 skill、生图保存到项目目录。

@@ -1667,6 +1667,7 @@ async def responses(
                     reasoning_effort_override=("high" if reasoning_effort == "xhigh" else reasoning_effort),
                     allow_tools=settings.codex_allow_tools,
                     enable_search=settings.enable_search,
+                    enable_image_gen=settings.enable_image_gen,
                 )
 
                 def _capture_headers(headers: dict[str, str]) -> None:
@@ -2146,6 +2147,7 @@ async def chat_completions(
                                     ),
                                     allow_tools=settings.codex_allow_tools,
                                     enable_search=settings.enable_search,
+                                    enable_image_gen=settings.enable_image_gen,
                                 )
                                 events = iter_codex_responses_events(
                                     base_url=settings.codex_responses_base_url,
@@ -2155,12 +2157,22 @@ async def chat_completions(
                                     event_callback=_evt_log if settings.log_events else None,
                                     response_headers_cb=_capture_codex_headers,
                                 )
-                                text, usage, tool_calls = await collect_codex_responses_text_and_usage(events)
+                                text, usage, tool_calls, images = await collect_codex_responses_text_and_usage(events)
+                                if images:
+                                    md_parts = []
+                                    for idx, img in enumerate(images):
+                                        fmt = img.get("output_format") or "png"
+                                        rp = img.get("revised_prompt") or f"image {idx + 1}"
+                                        md_parts.append(
+                                            f"![{rp}](data:image/{fmt};base64,{img['b64_json']})"
+                                        )
+                                    embedded = "\n\n".join(md_parts)
+                                    text = (text + "\n\n" + embedded) if text else embedded
                                 # Re-wrap usage into the same shape as codex exec path.
                                 return type(
                                     "BackendResult",
                                     (),
-                                    {"text": text, "usage": usage, "tool_calls": tool_calls},
+                                    {"text": text, "usage": usage, "tool_calls": tool_calls, "images": images},
                                 )()
 
                             events = iter_codex_events(
@@ -2489,6 +2501,7 @@ async def chat_completions(
                                     ),
                                     allow_tools=settings.codex_allow_tools,
                                     enable_search=settings.enable_search,
+                                    enable_image_gen=settings.enable_image_gen,
                                 )
                                 events = iter_codex_responses_events(
                                     base_url=settings.codex_responses_base_url,

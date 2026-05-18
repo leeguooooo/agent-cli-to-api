@@ -19,8 +19,8 @@ _OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 _OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 _DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
-_DEFAULT_CODEX_VERSION = "0.111.0"
-_DEFAULT_CODEX_USER_AGENT = "codex_cli_rs/0.111.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+_DEFAULT_CODEX_VERSION = "0.130.0"
+_DEFAULT_CODEX_USER_AGENT = "codex_cli_rs/0.130.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
 _INSTALLATION_ID = str(uuid.uuid4())
 _WEB_SEARCH_CITATION_HINT = (
     "Compatibility instruction: If you use web_search for this request, include a final "
@@ -433,6 +433,7 @@ def convert_chat_completions_to_codex_responses(
     reasoning_effort_override: str | None = None,
     allow_tools: bool = False,
     enable_search: bool = False,
+    enable_image_gen: bool = False,
 ) -> dict[str, Any]:
     instructions = codex_instructions_for_model(model_name)
 
@@ -483,7 +484,14 @@ def convert_chat_completions_to_codex_responses(
         ):
             tools.append({"type": "web_search", "external_web_access": True})
 
-    if not allow_tools and not enable_search:
+    if enable_image_gen:
+        tools = out["tools"]
+        if isinstance(tools, list) and not any(
+            isinstance(tool, dict) and tool.get("type") == "image_generation" for tool in tools
+        ):
+            tools.append({"type": "image_generation"})
+
+    if not allow_tools and not enable_search and not enable_image_gen:
         # For proxying chat completions / UI automation, we generally want pure text output.
         # Codex backend can otherwise attempt MCP/tool calls (which are not available here),
         # leading to noisy logs and occasional refusals. Users who need tools should use
@@ -674,18 +682,37 @@ async def iter_codex_responses_events(
 
 async def collect_codex_responses_text_and_usage(
     events: AsyncIterator[dict[str, Any]],
-) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]] | None]:
+) -> tuple[str, dict[str, Any] | None, list[dict[str, Any]] | None, list[dict[str, Any]]]:
     chunks: list[str] = []
     usage: dict[str, Any] | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    images: list[dict[str, Any]] = []
 
     async for evt in events:
         t = evt.get("type")
+        if t == "keepalive":
+            continue
         if t == "response.output_text.delta" and isinstance(evt.get("delta"), str):
             chunks.append(evt["delta"])
         # Some very short responses can arrive only as a final "done" event.
         if t == "response.output_text.done" and not chunks and isinstance(evt.get("text"), str):
             chunks.append(evt["text"])
+        if t == "response.output_item.done":
+            item = evt.get("item")
+            if isinstance(item, dict) and item.get("type") == "image_generation_call":
+                b64 = item.get("result")
+                if isinstance(b64, str) and b64:
+                    images.append(
+                        {
+                            "id": item.get("id"),
+                            "b64_json": b64,
+                            "output_format": item.get("output_format") or "png",
+                            "size": item.get("size"),
+                            "quality": item.get("quality"),
+                            "background": item.get("background"),
+                            "revised_prompt": item.get("revised_prompt"),
+                        }
+                    )
         if t == "response.completed":
             resp = evt.get("response") or {}
             u = resp.get("usage") if isinstance(resp, dict) else None
@@ -706,7 +733,7 @@ async def collect_codex_responses_text_and_usage(
                     tool_calls = parsed
             break
 
-    return "".join(chunks), usage, tool_calls
+    return "".join(chunks), usage, tool_calls, images
 
 
 async def collect_codex_responses_native_response(

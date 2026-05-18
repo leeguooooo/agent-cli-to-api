@@ -17,7 +17,7 @@ GatewayProvider = Literal["auto", "codex", "cursor-agent", "claude", "gemini"]
 
 _GATEWAY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 _DEFAULT_CODEX_CLI_HOME = os.path.join(_GATEWAY_ROOT, ".codex-gateway-home")
-_FALLBACK_CODEX_VERSION = "0.111.0"
+_FALLBACK_CODEX_VERSION = "0.130.0"
 
 
 def _maybe_load_dotenv(path: Path) -> None:
@@ -329,6 +329,19 @@ def _env_json_dict_str_str(name: str) -> dict[str, str]:
 
 
 def _detect_codex_cli_version() -> str:
+    # Prefer ~/.codex/version.json — the CLI itself updates this and it's readable
+    # without needing `node` on PATH (the `codex` binary is a node script, and
+    # launchd-style envs often lack /opt/homebrew/bin).
+    try:
+        version_file = Path.home() / ".codex" / "version.json"
+        if version_file.exists():
+            data = json.loads(version_file.read_text())
+            v = data.get("latest_version")
+            if isinstance(v, str) and re.fullmatch(r"\d+\.\d+\.\d+", v):
+                return v
+    except Exception:
+        pass
+
     codex_bin = shutil.which("codex")
     if not codex_bin:
         for candidate in ("/opt/homebrew/bin/codex", "/usr/local/bin/codex"):
@@ -388,6 +401,7 @@ class Settings:
     approval_policy: ApprovalPolicy = os.environ.get("CODEX_APPROVAL_POLICY", "never")  # type: ignore[assignment]
     skip_git_repo_check: bool = _env_bool("CODEX_SKIP_GIT_REPO_CHECK", True)
     enable_search: bool = _env_bool("CODEX_ENABLE_SEARCH", True)
+    enable_image_gen: bool = _env_bool("CODEX_ENABLE_IMAGE_GEN", True)
     add_dirs: list[str] = field(default_factory=lambda: _env_csv("CODEX_ADD_DIRS"))
     model_aliases: dict[str, str] = field(default_factory=lambda: _env_json_dict_str_str("CODEX_MODEL_ALIASES"))
     advertised_models: list[str] = field(default_factory=lambda: _env_csv("CODEX_ADVERTISED_MODELS"))
@@ -396,8 +410,10 @@ class Settings:
     disable_view_image_tool: bool = _env_bool("CODEX_DISABLE_VIEW_IMAGE_TOOL", True)
 
     # Use Codex backend `/responses` API (like Codex CLI) instead of `codex exec`.
-    # This avoids MCP/tool-call flakiness and provides true token streaming.
-    use_codex_responses_api: bool = _env_bool("CODEX_USE_CODEX_RESPONSES_API", False)
+    # This avoids MCP/tool-call flakiness, provides true token streaming, and is
+    # the only path that supports the image_generation tool. Defaults to True;
+    # set CODEX_USE_CODEX_RESPONSES_API=0 to fall back to `codex exec` subprocess.
+    use_codex_responses_api: bool = _env_bool("CODEX_USE_CODEX_RESPONSES_API", True)
     codex_responses_base_url: str = _env_str(
         "CODEX_CODEX_BASE_URL",
         "https://chatgpt.com/backend-api/codex",
