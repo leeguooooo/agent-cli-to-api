@@ -575,13 +575,42 @@ def _maybe_strip_answer_tags(text: str) -> str:
     return text
 
 
+_DATA_URI_RE = re.compile(r"data:image/(\w+);base64,([A-Za-z0-9+/=]+)")
+
+
+def _strip_image_data_uris(text: str) -> str:
+    """Replace inline base64 image data URIs with a short placeholder so logs
+    don't fill with useless PNG bytes when image_generation is enabled."""
+
+    def _sub(m: re.Match[str]) -> str:
+        fmt = m.group(1)
+        size = len(m.group(2))
+        return f"<image/{fmt} {size}B base64 omitted>"
+
+    return _DATA_URI_RE.sub(_sub, text)
+
+
 def _truncate_for_log(text: str) -> str:
     limit = settings.log_max_chars
     if limit <= 0:
         return ""
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}\n... (truncated, {len(text)} chars total)"
+    cleaned = _strip_image_data_uris(text)
+    if len(cleaned) <= limit:
+        return cleaned
+    return f"{cleaned[:limit]}\n... (truncated, {len(cleaned)} chars total)"
+
+
+def _md_escape_alt(text: str) -> str:
+    """Sanitize markdown image alt-text so a `]` or `)` from a model-generated
+    revised_prompt cannot break the surrounding `![alt](url)` structure."""
+    if not text:
+        return ""
+    cleaned = text.replace("\n", " ").replace("\r", " ")
+    cleaned = cleaned.replace("\\", "\\\\").replace("]", "\\]").replace("[", "\\[")
+    cleaned = cleaned.replace("(", "\\(").replace(")", "\\)")
+    if len(cleaned) > 200:
+        cleaned = cleaned[:197] + "..."
+    return cleaned
 
 
 def _inline_log_text(text: str) -> str:
@@ -1883,6 +1912,24 @@ async def chat_completions(
         stream=req.stream,
     )
 
+    # Image generation cannot be streamed back through chat completions: the
+    # base64 PNG arrives in a single `response.output_item.done` event after
+    # the model finishes, with no usable token-stream. The streaming consumer
+    # would silently drop it and the client would get an empty stream. Reject
+    # the combo loudly instead of returning garbage.
+    if (
+        req.stream
+        and provider == "codex"
+        and use_codex_backend
+        and settings.enable_image_gen
+    ):
+        return _openai_error(
+            "image_generation is enabled on this gateway but streaming chat "
+            "completions cannot return images. Re-send with stream=false, or "
+            "disable image_generation (CODEX_ENABLE_IMAGE_GEN=0).",
+            status_code=400,
+        )
+
     sem = _get_semaphore()
     try:
         mode_label = "cli"
@@ -2163,8 +2210,9 @@ async def chat_completions(
                                     for idx, img in enumerate(images):
                                         fmt = img.get("output_format") or "png"
                                         rp = img.get("revised_prompt") or f"image {idx + 1}"
+                                        alt = _md_escape_alt(rp)
                                         md_parts.append(
-                                            f"![{rp}](data:image/{fmt};base64,{img['b64_json']})"
+                                            f"![{alt}](data:image/{fmt};base64,{img['b64_json']})"
                                         )
                                     embedded = "\n\n".join(md_parts)
                                     text = (text + "\n\n" + embedded) if text else embedded

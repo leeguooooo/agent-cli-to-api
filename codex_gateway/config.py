@@ -405,7 +405,11 @@ class Settings:
     approval_policy: ApprovalPolicy = os.environ.get("CODEX_APPROVAL_POLICY", "never")  # type: ignore[assignment]
     skip_git_repo_check: bool = _env_bool("CODEX_SKIP_GIT_REPO_CHECK", True)
     enable_search: bool = _env_bool("CODEX_ENABLE_SEARCH", True)
-    enable_image_gen: bool = _env_bool("CODEX_ENABLE_IMAGE_GEN", True)
+    # NOTE: defaulted to False because injecting the image_generation tool into
+    # every chat completion lets the model decide to draw a picture for prompts
+    # that don't want one — 25s extra latency and subscription quota burn for
+    # what was meant to be a text request. Opt in with CODEX_ENABLE_IMAGE_GEN=1.
+    enable_image_gen: bool = _env_bool("CODEX_ENABLE_IMAGE_GEN", False)
     add_dirs: list[str] = field(default_factory=lambda: _env_csv("CODEX_ADD_DIRS"))
     model_aliases: dict[str, str] = field(default_factory=lambda: _env_json_dict_str_str("CODEX_MODEL_ALIASES"))
     advertised_models: list[str] = field(default_factory=lambda: _env_csv("CODEX_ADVERTISED_MODELS"))
