@@ -656,28 +656,34 @@ async def iter_codex_responses_events(
                 except Exception:
                     pass
 
-            async for line in resp.aiter_lines():
-                if not line:
-                    continue
-                line = line.strip()
-                if not line or line.startswith(":") or line.startswith("event:"):
-                    continue
-                if not line.startswith("data:"):
-                    continue
-                data = line.removeprefix("data:").strip()
-                if not data or data == "[DONE]":
-                    continue
-                try:
-                    obj = json.loads(data)
-                except Exception:
-                    continue
-                if isinstance(obj, dict):
-                    if event_callback is not None:
-                        try:
-                            event_callback(obj)
-                        except Exception:
-                            pass
-                    yield obj
+            try:
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    line = line.strip()
+                    if not line or line.startswith(":") or line.startswith("event:"):
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    data = line.removeprefix("data:").strip()
+                    if not data or data == "[DONE]":
+                        continue
+                    try:
+                        obj = json.loads(data)
+                    except Exception:
+                        continue
+                    if isinstance(obj, dict):
+                        if event_callback is not None:
+                            try:
+                                event_callback(obj)
+                            except Exception:
+                                pass
+                        yield obj
+            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ReadTimeout) as exc:
+                yield {
+                    "type": "gateway.upstream_incomplete",
+                    "message": f"codex responses stream ended before completion: {exc}",
+                }
 
 
 async def collect_codex_responses_text_and_usage(
@@ -687,9 +693,14 @@ async def collect_codex_responses_text_and_usage(
     usage: dict[str, Any] | None = None
     tool_calls: list[dict[str, Any]] | None = None
     images: list[dict[str, Any]] = []
+    incomplete_message: str | None = None
 
     async for evt in events:
         t = evt.get("type")
+        if t == "gateway.upstream_incomplete":
+            msg = evt.get("message")
+            incomplete_message = msg if isinstance(msg, str) and msg else "codex responses stream ended before completion"
+            break
         if t == "keepalive":
             continue
         if t == "response.output_text.delta" and isinstance(evt.get("delta"), str):
@@ -732,6 +743,9 @@ async def collect_codex_responses_text_and_usage(
                 if parsed:
                     tool_calls = parsed
             break
+
+    if incomplete_message and not chunks and not images and not tool_calls:
+        raise RuntimeError(incomplete_message)
 
     return "".join(chunks), usage, tool_calls, images
 

@@ -3,6 +3,7 @@ import unittest
 
 from codex_gateway.codex_responses import (
     collect_codex_responses_native_response,
+    collect_codex_responses_text_and_usage,
     convert_chat_completions_to_codex_responses,
 )
 from codex_gateway.config import Settings
@@ -69,6 +70,43 @@ class SearchTests(unittest.TestCase):
             [item["type"] for item in response["output"]],
             ["web_search_call", "message"],
         )
+
+    def test_codex_text_collector_keeps_completed_image_on_incomplete_stream(self) -> None:
+        async def events():
+            for evt in [
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "id": "img_1",
+                        "type": "image_generation_call",
+                        "result": "abc123",
+                        "output_format": "png",
+                        "size": "1024x1536",
+                    },
+                },
+                {
+                    "type": "gateway.upstream_incomplete",
+                    "message": "codex responses stream ended before completion",
+                },
+            ]:
+                yield evt
+
+        text, usage, tool_calls, images = asyncio.run(collect_codex_responses_text_and_usage(events()))
+
+        self.assertEqual(text, "")
+        self.assertIsNone(usage)
+        self.assertIsNone(tool_calls)
+        self.assertEqual(images[0]["b64_json"], "abc123")
+
+    def test_codex_text_collector_raises_on_incomplete_stream_without_result(self) -> None:
+        async def events():
+            yield {
+                "type": "gateway.upstream_incomplete",
+                "message": "codex responses stream ended before completion",
+            }
+
+        with self.assertRaisesRegex(RuntimeError, "ended before completion"):
+            asyncio.run(collect_codex_responses_text_and_usage(events()))
 
     def test_native_response_synthesizes_web_search_url_annotations(self) -> None:
         async def events():
