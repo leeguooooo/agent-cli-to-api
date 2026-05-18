@@ -41,6 +41,39 @@ the user to start it — do not silently fall back.
   Codex CLI's bundled `imagegen` skill or call `/v1/images/edits` directly
   with their `OPENAI_API_KEY` (this skill is generate-only at present).
 
+## Credentials — DO NOT pass tokens on the command line
+
+Agents running this skill **must not** put `CODEX_API_TOKEN=...` or `--token ...`
+on the command line, because tool calls are echoed into transcripts and chat
+logs. The token would leak into anyone who can see the conversation.
+
+The script reads the gateway URL and token from three sources, in priority
+order:
+
+1. CLI flag (`--base-url`, `--token`) — **only when the user explicitly types
+   them**; never construct these flags from a token your agent has memorised.
+2. Environment variable (`CODEX_API_BASE_URL`, `CODEX_API_TOKEN`) — works if
+   the user exports them in their shell config.
+3. Plain file (`~/.config/codex-api/base_url` and `~/.config/codex-api/token`,
+   one line each, recommended mode `600`) — preferred for agent workflows.
+
+**One-time setup (user runs this, once):**
+
+```bash
+mkdir -p ~/.config/codex-api
+chmod 700 ~/.config/codex-api
+printf 'https://your-gateway.example.com' > ~/.config/codex-api/base_url
+printf 'your-gateway-token'              > ~/.config/codex-api/token
+chmod 600 ~/.config/codex-api/{base_url,token}
+```
+
+After that, the agent just runs `python3 scripts/generate.py "<prompt>"` with
+**no env, no token flag** — credentials come from the file silently.
+
+If the file is missing and no env vars are set, the script falls back to
+`http://127.0.0.1:8000` + `devtoken` (the default for a locally-running
+gateway with no auth configured).
+
 ## How to invoke
 
 ```bash
@@ -55,8 +88,8 @@ Common options:
 | `--size` | `auto` | `1024x1024`, `1536x1024`, `1024x1536`, `2048x2048`, `3840x2160`, etc. The subscription path honours the size. |
 | `--format` | `png` | `png` \| `jpeg` \| `webp` |
 | `--model` | `gpt-5.5` | The chat model that hosts `image_generation` |
-| `--base-url` | `http://127.0.0.1:8000` | Or set `CODEX_API_BASE_URL` |
-| `--token` | `devtoken` | Or set `CODEX_API_TOKEN` |
+| `--base-url` | from `$CODEX_API_BASE_URL` → `~/.config/codex-api/base_url` → `http://127.0.0.1:8000` | Override gateway URL. **Don't pass this from an agent — set the file once.** |
+| `--token` | from `$CODEX_API_TOKEN` → `~/.config/codex-api/token` → `devtoken` | Bearer token for the gateway. **Don't pass this from an agent — set the file once.** |
 | `--quiet` | off | Print only the output path on stdout |
 
 The script prints **just the saved file path on stdout** (and progress info on

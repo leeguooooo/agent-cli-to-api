@@ -22,8 +22,35 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DEFAULT_BASE = os.environ.get("CODEX_API_BASE_URL", "http://127.0.0.1:8000")
-DEFAULT_TOKEN = os.environ.get("CODEX_API_TOKEN", "devtoken")
+def _read_token_file() -> str | None:
+    """Read token from ~/.config/codex-api/token (single line, mode 600 expected).
+
+    This lets users keep the token out of shell history and out of any chat
+    transcripts produced by agents. Falls through to env / CLI flag if missing.
+    """
+    path = Path.home() / ".config" / "codex-api" / "token"
+    try:
+        if not path.exists():
+            return None
+        text = path.read_text(encoding="utf-8").strip()
+        return text or None
+    except Exception:
+        return None
+
+
+def _read_base_file() -> str | None:
+    path = Path.home() / ".config" / "codex-api" / "base_url"
+    try:
+        if not path.exists():
+            return None
+        text = path.read_text(encoding="utf-8").strip()
+        return text or None
+    except Exception:
+        return None
+
+
+DEFAULT_BASE = os.environ.get("CODEX_API_BASE_URL") or _read_base_file() or "http://127.0.0.1:8000"
+DEFAULT_TOKEN = os.environ.get("CODEX_API_TOKEN") or _read_token_file() or "devtoken"
 DEFAULT_MODEL = os.environ.get("CODEX_API_IMAGE_MODEL", "gpt-5.5")
 
 
