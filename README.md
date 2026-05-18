@@ -323,7 +323,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
 The Codex CLI's built-in `image_gen` capability is implemented as a native **Responses API tool** (`{"type": "image_generation"}`) hosted on ChatGPT's internal `backend-api/codex` endpoint — and your `~/.codex/auth.json` OAuth token is what authorises it. This gateway:
 
 1. Reuses that OAuth token (no API key needed).
-2. Injects `{"type": "image_generation"}` into the `tools` array on every chat completion request when `CODEX_ENABLE_IMAGE_GEN=1` (default).
+2. Injects `{"type": "image_generation"}` into the `tools` array on every chat completion request when `CODEX_ENABLE_IMAGE_GEN=1`. **Default is OFF** so plain-text completions don't get the tool silently attached.
 3. Streams the upstream Responses events, intercepts the `image_generation_call` output items, and embeds the resulting base64 PNG into the assistant message content as a markdown data URI: `![](data:image/png;base64,…)`.
 4. Returns a standard OpenAI Chat Completion response — any client that understands the OpenAI SDK gets the image for free.
 
@@ -331,7 +331,7 @@ The Codex CLI's built-in `image_gen` capability is implemented as a native **Res
 
 - Logged-in Codex CLI (`codex login` once — creates `~/.codex/auth.json`).
 - `CODEX_USE_CODEX_RESPONSES_API=1` (this is the default).
-- `CODEX_ENABLE_IMAGE_GEN=1` (this is the default; set to `0` to disable).
+- **`CODEX_ENABLE_IMAGE_GEN=1` (must be set explicitly — default is OFF)**. Without this the gateway does not inject the `image_generation` tool and `/v1/chat/completions` returns text only.
 
 ### Example (curl)
 
@@ -399,6 +399,17 @@ Drop the `skills/imagegen/` directory into any agent's skill directory (or symli
 - Calls consume your ChatGPT subscription image quota — **shared with the ChatGPT web app and Codex CLI**.
 - One image typically takes **15–40 seconds** at default quality.
 - This is a *thin* gateway, not a "free image API for everyone" — it's meant for personal automation, agent workflows, and dogfooding from your own developer machine. Putting it behind a public proxy violates OpenAI's ToS for your subscription. Use a token (`CODEX_GATEWAY_TOKEN`) and bind to `127.0.0.1`.
+
+### Concurrency
+
+The ChatGPT subscription backend handles concurrent `image_generation` requests fine — measured on a Plus account, 4 simultaneous requests all returned 200 with `total_wall ≈ slowest_single` (~27s), i.e. **fully parallel, no serialization, no 429**. You don't need a semaphore in the gateway for this on personal use.
+
+When you *might* want to add one (`CODEX_IMAGE_GEN_CONCURRENCY` is not currently a knob — open an issue if you need it):
+
+- **Multi-user / team-shared gateway**: a burst of slow image requests can fill the worker pool (`CODEX_MAX_CONCURRENCY=100` by default) and make text completions queue behind them.
+- **High-frequency batch generation** (>10 images/min sustained): you'll eventually hit subscription rate limits.
+
+Either way, streaming chat completions and image generation are **mutually exclusive** — `stream=true` requests get HTTP 400 if `CODEX_ENABLE_IMAGE_GEN=1`, since image bytes can't be chunked back through SSE in a way that any OpenAI SDK understands. Set `stream=false` for image gen requests.
 
 ### Just want a local CLI / agent skill (no server)?
 

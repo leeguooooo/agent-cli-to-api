@@ -18,12 +18,17 @@ PNG and writes it to a path inside the current project.
   - Or rely on the user's launchd auto-start (`com.codex-api.gateway`).
 - The user has a logged-in ChatGPT subscription (`~/.codex/auth.json` exists,
   populated by `codex login` in the Codex CLI). No `OPENAI_API_KEY` required.
-- Gateway settings (defaults are already correct on a fresh install):
-  - `CODEX_USE_CODEX_RESPONSES_API=1` (default)
-  - `CODEX_ENABLE_IMAGE_GEN=1` (default)
+- Gateway settings:
+  - `CODEX_USE_CODEX_RESPONSES_API=1` — **default**
+  - `CODEX_ENABLE_IMAGE_GEN=1` — **must be set explicitly** (default is OFF). If
+    it's not set, the gateway won't inject the `image_generation` tool and the
+    model will return text only. Symptom: the script exits with
+    `Model did not return an image`.
 
 If the gateway is unreachable, point the agent at the `codex-api` repo and ask
-the user to start it — do not silently fall back.
+the user to start it — do not silently fall back. If `CODEX_ENABLE_IMAGE_GEN`
+is unset, tell the user to add it to their `.env` / launchd plist and restart
+the gateway, or to launch a one-off gateway with that env set.
 
 ## When to use
 
