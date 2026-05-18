@@ -400,6 +400,17 @@ Drop the `skills/imagegen/` directory into any agent's skill directory (or symli
 - One image typically takes **15–40 seconds** at default quality.
 - This is a *thin* gateway, not a "free image API for everyone" — it's meant for personal automation, agent workflows, and dogfooding from your own developer machine. Putting it behind a public proxy violates OpenAI's ToS for your subscription. Use a token (`CODEX_GATEWAY_TOKEN`) and bind to `127.0.0.1`.
 
+### Just want a local CLI / agent skill (no server)?
+
+If you don't need the HTTP gateway and just want to generate images from your terminal or from an AI agent (Claude Code / Cursor / Codex Agent / OpenClaw…), use the sister project:
+
+➡️ **[leeguooooo/chatgpt-imagegen](https://github.com/leeguooooo/chatgpt-imagegen)** — single-file Python CLI + agent skill, zero deps, same ChatGPT-subscription backend. Install via `npx skills add leeguooooo/chatgpt-imagegen -g`.
+
+| You want | Use |
+| --- | --- |
+| OpenAI-compatible HTTP API, multi-app, team-shared | **this repo** (`agent-cli-to-api`) |
+| Local CLI only, agent-driven, no server | [**chatgpt-imagegen**](https://github.com/leeguooooo/chatgpt-imagegen) |
+
 ## OpenAI SDK examples
 
 Python:
