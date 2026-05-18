@@ -329,9 +329,33 @@ def _env_json_dict_str_str(name: str) -> dict[str, str]:
 
 
 def _detect_codex_cli_version() -> str:
-    # Prefer ~/.codex/version.json — the CLI itself updates this and it's readable
-    # without needing `node` on PATH (the `codex` binary is a node script, and
-    # launchd-style envs often lack /opt/homebrew/bin).
+    # Prefer the installed binary over ~/.codex/version.json. The cache can lag behind
+    # an app/CLI upgrade, and the backend gates some models by this reported version.
+    codex_bin = shutil.which("codex")
+    if not codex_bin:
+        for candidate in ("/opt/homebrew/bin/codex", "/usr/local/bin/codex"):
+            if Path(candidate).exists():
+                codex_bin = candidate
+                break
+    if codex_bin:
+        try:
+            proc = subprocess.run(
+                [codex_bin, "--version"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except Exception:
+            pass
+        else:
+            text = f"{proc.stdout}\n{proc.stderr}"
+            match = re.search(r"\b(\d+\.\d+\.\d+)\b", text)
+            if match:
+                return match.group(1)
+
+    # Fall back to ~/.codex/version.json for launchd-style envs where PATH may not
+    # include the CLI location.
     try:
         version_file = Path.home() / ".codex" / "version.json"
         if version_file.exists():
@@ -342,27 +366,7 @@ def _detect_codex_cli_version() -> str:
     except Exception:
         pass
 
-    codex_bin = shutil.which("codex")
-    if not codex_bin:
-        for candidate in ("/opt/homebrew/bin/codex", "/usr/local/bin/codex"):
-            if Path(candidate).exists():
-                codex_bin = candidate
-                break
-    if not codex_bin:
-        return _FALLBACK_CODEX_VERSION
-    try:
-        proc = subprocess.run(
-            [codex_bin, "--version"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except Exception:
-        return _FALLBACK_CODEX_VERSION
-    text = f"{proc.stdout}\n{proc.stderr}"
-    match = re.search(r"\b(\d+\.\d+\.\d+)\b", text)
-    return match.group(1) if match else _FALLBACK_CODEX_VERSION
+    return _FALLBACK_CODEX_VERSION
 
 
 def _default_codex_user_agent(version: str) -> str:
