@@ -422,6 +422,11 @@ If you don't need the HTTP gateway and just want to generate images from your te
 | OpenAI-compatible HTTP API, multi-app, team-shared | **this repo** (`agent-cli-to-api`) |
 | Local CLI only, agent-driven, no server | [**chatgpt-imagegen**](https://github.com/leeguooooo/chatgpt-imagegen) |
 
+Background reading on the subscription-as-image-API approach (covers both projects):
+
+- [技术拆解：把 ChatGPT 订阅转成生图 API](https://blog.misonote.com/zh/posts/chatgpt-subscription-image-api/) — OAuth + Responses API + SSE walkthrough (zh).
+- [可视化速览：一图看懂](https://blog.misonote.com/zh/posts/chatgpt-imagegen-visual-guide/) — capability matrix and flow diagram (zh).
+
 ## OpenAI SDK examples
 
 Python:
