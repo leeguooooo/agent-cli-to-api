@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import os
@@ -121,13 +122,146 @@ if settings.cors_origins.strip():
         )
 
 
+_banned_ips: dict[str, float] = {}
+
+
+def _valid_ip(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return None
+
+
+def _request_client_ip(request: Request) -> str:
+    if settings.trust_proxy_headers:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            for part in forwarded_for.split(","):
+                ip = _valid_ip(part)
+                if ip:
+                    return ip
+        real_ip = _valid_ip(request.headers.get("x-real-ip"))
+        if real_ip:
+            return real_ip
+
+    host = request.client.host if request.client else None
+    return _valid_ip(host) or (host or "unknown")
+
+
+def _is_suspicious_path(path: str) -> bool:
+    prefixes = [p.strip() for p in settings.suspicious_path_prefixes if p.strip()]
+    return any(path.startswith(prefix) for prefix in prefixes)
+
+
+def _is_ip_banned(ip: str, now: float) -> bool:
+    banned_until = _banned_ips.get(ip)
+    if banned_until is None:
+        return False
+    if banned_until <= now:
+        _banned_ips.pop(ip, None)
+        return False
+    return True
+
+
+def _ban_ip(ip: str, now: float) -> None:
+    duration = max(settings.ban_duration_seconds, 0)
+    if duration <= 0:
+        return
+    _banned_ips[ip] = now + duration
+
+
+def _audit_failed_request(resp_id: str, request: Request, req: ChatCompletionRequest, prompt: str) -> None:
+    if not settings.audit_failed_requests:
+        return
+    max_chars = max(settings.audit_failed_request_chars, 0)
+    if max_chars == 0:
+        return
+    logger.warning(
+        "[%s] failed_request_audit ip=%s path=%s model=%s stream=%s prompt_chars=%d prompt_excerpt:\n%s",
+        resp_id,
+        _request_client_ip(request),
+        request.url.path,
+        req.model,
+        req.stream,
+        len(prompt),
+        _truncate_for_log(prompt, max_chars),
+    )
+
+
+def _audit_statuses() -> set[int]:
+    out: set[int] = set()
+    for raw in settings.audit_request_header_statuses:
+        try:
+            out.add(int(str(raw).strip()))
+        except ValueError:
+            continue
+    return out
+
+
+def _should_audit_request_headers(path: str, status_code: int) -> bool:
+    if not settings.audit_request_headers:
+        return False
+    if status_code not in _audit_statuses():
+        return False
+    prefixes = [p.strip() for p in settings.audit_request_header_prefixes if p.strip()]
+    return any(path.startswith(prefix) for prefix in prefixes)
+
+
+def _safe_header_value(name: str, value: str) -> str:
+    sensitive = {"authorization", "cookie", "set-cookie", "x-api-key", "api-key", "proxy-authorization"}
+    if settings.audit_redact_headers and name.lower() in sensitive:
+        return "<redacted>"
+    limit = 500
+    return value if len(value) <= limit else f"{value[:limit]}... (truncated, {len(value)} chars total)"
+
+
+def _audit_request_headers(request: Request, client_ip: str, status_code: int) -> None:
+    if not _should_audit_request_headers(request.url.path, status_code):
+        return
+    allowed = {h.strip().lower() for h in settings.audit_request_header_names if h.strip()}
+    audit_all = "*" in allowed
+    headers: dict[str, str] = {}
+    for name, value in request.headers.items():
+        lname = name.lower()
+        if audit_all or lname in allowed:
+            headers[lname] = _safe_header_value(lname, value)
+    query = request.url.query
+    print(
+        (
+            f"[security] request_headers ip={client_ip} status={status_code} "
+            f"method={request.method} path={request.url.path} "
+            f"query={query if len(query) <= 500 else f'{query[:500]}... (truncated, {len(query)} chars total)'} "
+            f"headers={json.dumps(headers, ensure_ascii=False, sort_keys=True)}"
+        ),
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 @app.middleware("http")
 async def _log_requests(request: Request, call_next):
     start = time.time()
-    response = await call_next(request)
+    client_ip = _request_client_ip(request)
+    if settings.ban_suspicious_paths:
+        if _is_ip_banned(client_ip, start):
+            response = JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        elif _is_suspicious_path(request.url.path):
+            _ban_ip(client_ip, start)
+            logger.warning("[security] banned ip=%s path=%s", client_ip, request.url.path)
+            response = JSONResponse(status_code=403, content={"detail": "Forbidden"})
+        else:
+            response = await call_next(request)
+    else:
+        response = await call_next(request)
+    _audit_request_headers(request, client_ip, response.status_code)
     duration = (time.time() - start) * 1000
     print(
-        f"[request] {request.method} {request.url.path} {response.status_code} {duration:.0f}ms",
+        f"[request] {request.method} {request.url.path} {response.status_code} {duration:.0f}ms ip={client_ip}",
         file=sys.stderr,
         flush=True,
     )
@@ -590,8 +724,9 @@ def _strip_image_data_uris(text: str) -> str:
     return _DATA_URI_RE.sub(_sub, text)
 
 
-def _truncate_for_log(text: str) -> str:
-    limit = settings.log_max_chars
+def _truncate_for_log(text: str, limit: int | None = None) -> str:
+    if limit is None:
+        limit = settings.log_max_chars
     if limit <= 0:
         return ""
     cleaned = _strip_image_data_uris(text)
@@ -873,7 +1008,8 @@ def _build_curl_command(
         flags += " -N"
     lines = [f"curl {flags} -X POST {url} \\", "  -H 'Content-Type: application/json' \\"]
     if authorization:
-        lines.append(f"  -H 'Authorization: {authorization}' \\")
+        logged_authorization = "Bearer <redacted>" if settings.log_redact_authorization else authorization
+        lines.append(f"  -H 'Authorization: {logged_authorization}' \\")
     lines.append(f"  -d @- <<'{delimiter}'")
     lines.append(payload_json)
     lines.append(delimiter)
@@ -1537,6 +1673,13 @@ async def debug_config(authorization: str | None = Header(default=None)):
         "log_mode": settings.effective_log_mode(),
         "log_events": settings.log_events,
         "log_max_chars": settings.log_max_chars,
+        "audit_failed_requests": settings.audit_failed_requests,
+        "audit_failed_request_chars": settings.audit_failed_request_chars,
+        "audit_request_headers": settings.audit_request_headers,
+        "audit_request_header_statuses": settings.audit_request_header_statuses,
+        "audit_request_header_prefixes": settings.audit_request_header_prefixes,
+        "audit_redact_headers": settings.audit_redact_headers,
+        "log_redact_authorization": settings.log_redact_authorization,
     }
 
 
@@ -2932,6 +3075,7 @@ async def chat_completions(
     except (asyncio.TimeoutError, TimeoutError):
         error_msg = f"Request timed out after {settings.timeout_seconds}s"
         logger.error("[%s] error status=504 timeout_seconds=%d", resp_id, settings.timeout_seconds)
+        _audit_failed_request(resp_id, request, req, prompt)
         _active_requests -= 1
         _pending_questions.pop(resp_id, None)  # Clean up
         _request_stats.record_failure()
@@ -2948,6 +3092,7 @@ async def chat_completions(
         status = upstream or (400 if isinstance(e, RequestInputError) else 500)
         error_msg = str(e)
         logger.error("[%s] error status=%d %s", resp_id, status, _truncate_for_log(error_msg))
+        _audit_failed_request(resp_id, request, req, prompt)
         _active_requests -= 1
         _pending_questions.pop(resp_id, None)  # Clean up
         _request_stats.record_failure()

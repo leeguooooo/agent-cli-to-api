@@ -311,6 +311,16 @@ def _env_csv(name: str) -> list[str]:
     return items
 
 
+def _env_csv_default(name: str, default: str) -> list[str]:
+    raw = os.environ.get(name, default)
+    items: list[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if part:
+            items.append(part)
+    return items
+
+
 def _env_json_dict_str_str(name: str) -> dict[str, str]:
     raw = os.environ.get(name)
     if not raw:
@@ -511,6 +521,17 @@ class Settings:
     # CORS (comma-separated origins). Empty disables CORS.
     cors_origins: str = os.environ.get("CODEX_CORS_ORIGINS", "")
 
+    # Lightweight scanner mitigation. Bans are in-memory and reset on process restart.
+    ban_suspicious_paths: bool = _env_bool("CODEX_BAN_SUSPICIOUS_PATHS", True)
+    suspicious_path_prefixes: list[str] = field(
+        default_factory=lambda: _env_csv_default(
+            "CODEX_SUSPICIOUS_PATH_PREFIXES",
+            "/.env,/.git/,/wp-admin/,/wp-login.php,/phpmyadmin/",
+        )
+    )
+    ban_duration_seconds: int = _env_int("CODEX_BAN_DURATION_SECONDS", 24 * 60 * 60)
+    trust_proxy_headers: bool = _env_bool("CODEX_TRUST_PROXY_HEADERS", False)
+
     # Compatibility: strip `</answer>` from model output for clients that parse
     # do(...)/finish(...) calls (e.g. Open-AutoGLM).
     strip_answer_tags: bool = _env_bool("CODEX_STRIP_ANSWER_TAGS", True)
@@ -529,6 +550,31 @@ class Settings:
     log_stream_deltas: bool = _env_bool("CODEX_LOG_STREAM_DELTAS", False)
     log_stream_inline: bool = _env_bool("CODEX_LOG_STREAM_INLINE", False)
     log_stream_inline_suppress_final: bool = _env_bool("CODEX_LOG_STREAM_INLINE_SUPPRESS_FINAL", True)
+    audit_failed_requests: bool = _env_bool("CODEX_AUDIT_FAILED_REQUESTS", False)
+    audit_failed_request_chars: int = _env_int("CODEX_AUDIT_FAILED_REQUEST_CHARS", 2000)
+    audit_request_headers: bool = _env_bool("CODEX_AUDIT_REQUEST_HEADERS", False)
+    audit_request_header_statuses: list[str] = field(
+        default_factory=lambda: _env_csv_default("CODEX_AUDIT_REQUEST_HEADER_STATUSES", "403,404")
+    )
+    audit_request_header_prefixes: list[str] = field(
+        default_factory=lambda: _env_csv_default(
+            "CODEX_AUDIT_REQUEST_HEADER_PREFIXES",
+            "/aip/,/wham/,/codex/remote/control/",
+        )
+    )
+    audit_request_header_names: list[str] = field(
+        default_factory=lambda: _env_csv_default(
+            "CODEX_AUDIT_REQUEST_HEADER_NAMES",
+            (
+                "host,user-agent,accept,accept-language,accept-encoding,origin,referer,"
+                "content-type,content-length,cf-connecting-ip,cf-ray,cf-ipcountry,cf-visitor,"
+                "x-forwarded-for,x-real-ip,x-forwarded-proto,sec-fetch-site,sec-fetch-mode,"
+                "sec-fetch-dest,sec-ch-ua,sec-ch-ua-mobile,sec-ch-ua-platform"
+            ),
+        )
+    )
+    audit_redact_headers: bool = _env_bool("CODEX_AUDIT_REDACT_HEADERS", True)
+    log_redact_authorization: bool = _env_bool("CODEX_LOG_REDACT_AUTHORIZATION", True)
 
     def effective_log_mode(self) -> str:
         mode = (self.log_mode or "").strip().lower()
