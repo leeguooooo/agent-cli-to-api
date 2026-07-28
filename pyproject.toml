@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-cli-to-api"
-version = "0.2.2"
+version = "0.2.3"
 description = "Expose agent CLIs as a small OpenAI-compatible HTTP API."
 readme = "README.md"
 requires-python = ">=3.10"

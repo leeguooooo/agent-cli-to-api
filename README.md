@@ -39,13 +39,33 @@ Why this exists:
 
 ## Install
 
-### Option A: uv (recommended)
+### Option A: one-line installer
+
+```bash
+curl -fsSL https://github.com/leeguooooo/agent-cli-to-api/releases/latest/download/install.sh | sh
+```
+
+Install and start the macOS launchd service:
+
+```bash
+curl -fsSL https://github.com/leeguooooo/agent-cli-to-api/releases/latest/download/install.sh | INSTALL_LAUNCHD=1 sh
+```
+
+Pin a token and install the launchd service:
+
+```bash
+curl -fsSL https://github.com/leeguooooo/agent-cli-to-api/releases/latest/download/install.sh | CODEX_GATEWAY_TOKEN=devtoken INSTALL_LAUNCHD=1 sh
+```
+
+The installer defaults to `~/.agent-cli-to-api`, installs/updates `uv`, installs/updates Codex CLI for the Codex provider, creates `.env`, and uses the latest GitHub release. Set `AGENT_CLI_TO_API_REF=main` to install unreleased `main`.
+
+### Option B: uv
 
 ```bash
 uv sync
 ```
 
-### Option B: pip
+### Option C: pip
 
 ```bash
 python -m venv .venv
