@@ -84,17 +84,10 @@ if [[ "$UNINSTALL" -eq 1 ]]; then
 	exit 0
 fi
 
-UV_BIN="$(command -v uv || true)"
-if [[ -z "$UV_BIN" ]]; then
-	echo "uv not found in PATH" >&2
+START_SCRIPT="$ROOT_DIR/scripts/start_gateway.sh"
+if [[ ! -x "$START_SCRIPT" ]]; then
+	echo "Missing executable start script: $START_SCRIPT" >&2
 	exit 1
-fi
-
-PROGRAM_ARGS=(
-	"$UV_BIN" run agent-cli-to-api "$PROVIDER" --host "$HOST" --port "$PORT"
-)
-if [[ -n "$ENV_FILE" ]]; then
-	PROGRAM_ARGS+=(--env-file "$ENV_FILE")
 fi
 
 cat >"$PLIST_PATH" <<EOF
@@ -109,9 +102,7 @@ cat >"$PLIST_PATH" <<EOF
     <key>WorkingDirectory</key><string>${ROOT_DIR}</string>
     <key>ProgramArguments</key>
     <array>
-      <string>${UV_BIN}</string>
-      <string>run</string>
-      <string>agent-cli-to-api</string>
+      <string>${START_SCRIPT}</string>
       <string>${PROVIDER}</string>
       <string>--host</string>
       <string>${HOST}</string>
@@ -146,6 +137,7 @@ cat >>"$PLIST_PATH" <<EOF
 </plist>
 EOF
 
+launchctl bootout "gui/$(id -u)" "$PLIST_PATH" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
 launchctl enable "gui/$(id -u)/${LABEL}"
 launchctl kickstart -k "gui/$(id -u)/${LABEL}"

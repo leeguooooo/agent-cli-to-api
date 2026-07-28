@@ -42,7 +42,7 @@ from .codex_responses import (
     maybe_refresh_codex_auth,
     warmup_codex_auth,
 )
-from .config import settings
+from .config import DEFAULT_CODEX_ADVERTISED_MODELS, settings
 from .claude_oauth import generate_oauth as claude_oauth_generate
 from .claude_oauth import iter_oauth_stream_events as iter_claude_oauth_events
 from .gemini_cloudcode import generate_cloudcode as gemini_cloudcode_generate
@@ -1600,6 +1600,8 @@ async def list_models(authorization: str | None = Header(default=None)):
     default_id = _provider_default_model(forced_provider) or settings.default_model
     if settings.advertised_models:
         models = settings.advertised_models[:]
+    elif forced_provider in {"auto", "codex"}:
+        models = ["default", default_id, *DEFAULT_CODEX_ADVERTISED_MODELS]
     elif forced_provider != "auto" and not settings.allow_client_model_override:
         # When the provider is fixed (operator-controlled), the client-sent `model` string is
         # accepted but ignored by default, so we advertise a stable placeholder plus the

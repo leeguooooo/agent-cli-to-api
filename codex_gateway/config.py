@@ -18,6 +18,13 @@ GatewayProvider = Literal["auto", "codex", "cursor-agent", "claude", "gemini"]
 _GATEWAY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 _DEFAULT_CODEX_CLI_HOME = os.path.join(_GATEWAY_ROOT, ".codex-gateway-home")
 _FALLBACK_CODEX_VERSION = "0.130.0"
+DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+DEFAULT_CODEX_ADVERTISED_MODELS = [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+]
 
 
 def _maybe_load_dotenv(path: Path) -> None:
@@ -73,7 +80,7 @@ def _apply_preset() -> None:
         # Best defaults for local OpenAI-compatible API usage (fast + safe).
         "codex-fast": {
             "CODEX_PROVIDER": "codex",
-            "CODEX_MODEL": "gpt-5.5",
+            "CODEX_MODEL": DEFAULT_CODEX_MODEL,
             "CODEX_MODEL_REASONING_EFFORT": "low",
             "CODEX_USE_CODEX_RESPONSES_API": "1",
             "CODEX_SANDBOX": "read-only",
@@ -92,7 +99,7 @@ def _apply_preset() -> None:
         # Allow request-side provider prefixes (cursor:/claude:/gemini:) in `model`.
         "multi-fast": {
             "CODEX_PROVIDER": "auto",
-            "CODEX_MODEL": "gpt-5.5",
+            "CODEX_MODEL": DEFAULT_CODEX_MODEL,
             "CODEX_MODEL_REASONING_EFFORT": "low",
             "CODEX_USE_CODEX_RESPONSES_API": "1",
             "CODEX_SANDBOX": "read-only",
@@ -111,7 +118,7 @@ def _apply_preset() -> None:
         # Open-AutoGLM / phone automation focused.
         "autoglm-phone": {
             "CODEX_PROVIDER": "codex",
-            "CODEX_MODEL": "gpt-5.5",
+            "CODEX_MODEL": DEFAULT_CODEX_MODEL,
             "CODEX_MODEL_REASONING_EFFORT": "low",
             "CODEX_USE_CODEX_RESPONSES_API": "1",
             "CODEX_SANDBOX": "read-only",
@@ -204,7 +211,7 @@ def _apply_preset_env() -> None:
         # Open-AutoGLM style phone UI automation (action parsing + screenshots).
         "autoglm-phone": {
             "CODEX_PROVIDER": "codex",
-            "CODEX_MODEL": "gpt-5.5",
+            "CODEX_MODEL": DEFAULT_CODEX_MODEL,
             "CODEX_USE_CODEX_RESPONSES_API": "1",
             "CODEX_MODEL_REASONING_EFFORT": "low",
             "CODEX_DISABLE_SHELL_TOOL": "1",
@@ -404,7 +411,7 @@ class Settings:
     )
 
     # Codex CLI options.
-    default_model: str = os.environ.get("CODEX_MODEL", "gpt-5.5")
+    default_model: str = os.environ.get("CODEX_MODEL", DEFAULT_CODEX_MODEL)
     # Some local Codex configs default to xhigh, which is not accepted by all models.
     model_reasoning_effort: str | None = (
         _env_str("CODEX_MODEL_REASONING_EFFORT", "low").strip() or None
@@ -450,7 +457,7 @@ class Settings:
     provider: GatewayProvider = _env_str("CODEX_PROVIDER", "auto").strip().lower()  # type: ignore[assignment]
     # If true, always allow request `model` prefixes (cursor:/claude:/gemini:) to override provider.
     allow_client_provider_override: bool = _env_bool("CODEX_ALLOW_CLIENT_PROVIDER_OVERRIDE", False)
-    # If true, allow the client to choose the provider-specific model (e.g. pass `gpt-5.5` to Codex,
+    # If true, allow the client to choose the provider-specific model (e.g. pass `gpt-5.6-sol` to Codex,
     # or pass `sonnet` to Claude) via the request `model` field. When false, the gateway uses its
     # configured defaults (e.g. CURSOR_AGENT_MODEL / CLAUDE_MODEL / GEMINI_MODEL) and ignores the
     # client-sent model string (still accepted for OpenAI client compatibility).
