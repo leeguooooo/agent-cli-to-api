@@ -607,3 +607,7 @@ OpenAI-compatible API, chat completions, SSE streaming, agent gateway, CLI to AP
 ChatGPT subscription image generation API, ChatGPT Plus image API, ChatGPT Pro image API, use ChatGPT image generation without OPENAI_API_KEY, expose ChatGPT image generation as HTTP API, gpt-image-1 / gpt-image-2 via ChatGPT subscription, Codex CLI image_gen as API, DALL-E via ChatGPT Plus subscription, no-API-key image generation proxy, OAuth-backed OpenAI image generation, /v1/chat/completions image_generation tool, Responses API image_generation tool, image_generation_call SSE events, ChatGPT subscription as image API gateway, free-tier-friendly image generation gateway, agent skill for image generation, save generated image to project directory.
 
 **中文搜索词：** 用 ChatGPT 订阅生成图片接口、ChatGPT Plus 生图 API、不用 API key 生成图片、把 ChatGPT 订阅做成 OpenAI 兼容生图接口、ChatGPT 订阅生图代理、Codex CLI 生图能力接口化、gpt-image-2 用订阅调用、ChatGPT Plus 生图转 API、image_generation 工具网关、给 agent 用的生图 skill、生图保存到项目目录。
+
+## Author
+
+Built by **郭立 (Guo Li / leeguoo)** — [leeguoo.com](https://leeguoo.com/about) · [GitHub](https://github.com/leeguooooo) · [X](https://x.com/leeguooooo) · more tools in the [*-use family](https://github.com/leeguooooo/plugins).
