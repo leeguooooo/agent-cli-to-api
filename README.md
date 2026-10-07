@@ -146,13 +146,18 @@ Supported presets:
 ### Multi-provider routing
 
 Use `CODEX_PROVIDER=auto` and select providers per-request by prefixing `model`:
-- Codex: `"gpt-5.6-sol"`
+- Codex: `"gpt-6.1-sol"`
 - Cursor: `"cursor:<model>"`
 - Claude: `"claude:<model>"`
 - Gemini: `"gemini:<model>"`
 
 ### Codex backend options
 
+- The default model follows the Codex backend: with `CODEX_MODEL` unset (or `auto`) the
+  gateway uses the newest model Codex lists, refreshed at startup and hourly, so new
+  OpenAI models are picked up without upgrading the gateway. `/v1/models` advertises the
+  same live list. Set `CODEX_MODEL=<slug>` to pin one, or `CODEX_ADVERTISED_MODELS` to
+  override the list.
 - Web search is enabled by default for the Codex backend API (`CODEX_ENABLE_SEARCH=1`).
   The gateway adds the native Responses `web_search` tool to Codex `/responses`
   requests.
@@ -218,7 +223,7 @@ curl -s http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer devtoken" \
   -d '{
-    "model":"gpt-5.6-sol",
+    "model":"gpt-6.1-sol",
     "messages":[{"role":"user","content":"总结一下这个仓库结构"}],
     "reasoning": {"effort":"low"},
     "stream": false
@@ -316,7 +321,7 @@ python - <<'PY' > /tmp/pdf-payload.json
 import base64, json
 pdf_b64 = base64.b64encode(open("label.pdf","rb").read()).decode()
 print(json.dumps({
-  "model": "gpt-5.6-sol",
+  "model": "gpt-6.1-sol",
   "stream": False,
   "messages": [{
     "role": "user",
@@ -360,7 +365,7 @@ curl -sS http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer devtoken" \
   -d '{
-    "model": "gpt-5.6-sol",
+    "model": "gpt-6.1-sol",
     "stream": false,
     "messages": [
       {"role": "user",
@@ -380,7 +385,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="devtoken")
 resp = client.chat.completions.create(
-    model="gpt-5.6-sol",
+    model="gpt-6.1-sol",
     messages=[{"role": "user", "content": "Use the image_generation tool to render a watercolour cat."}],
 )
 m = re.search(r"data:image/(\w+);base64,([A-Za-z0-9+/=]+)", resp.choices[0].message.content)
@@ -456,7 +461,7 @@ from openai import OpenAI
 
 client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="devtoken")
 resp = client.chat.completions.create(
-    model="gpt-5.6-sol",
+    model="gpt-6.1-sol",
     messages=[{"role": "user", "content": "Hi"}],
 )
 print(resp.choices[0].message.content)
@@ -473,7 +478,7 @@ const client = new OpenAI({
 });
 
 const resp = await client.chat.completions.create({
-  model: "gpt-5.6-sol",
+  model: "gpt-6.1-sol",
   messages: [{ role: "user", content: "Hi" }],
 });
 
@@ -530,7 +535,7 @@ export CODEX_CLI_HOME=$PWD/.codex-gateway-home
 mkdir -p "$CODEX_CLI_HOME/.codex"
 cp ~/.codex/auth.json "$CODEX_CLI_HOME/.codex/auth.json"   # or set CODEX_API_KEY instead
 cat > "$CODEX_CLI_HOME/.codex/config.toml" <<'EOF'
-model = "gpt-5.6-sol"
+model = "gpt-6.1-sol"
 model_reasoning_effort = "low"
 
 [projects."/path/to/your/workspace"]

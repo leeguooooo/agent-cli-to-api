@@ -95,12 +95,21 @@ ensure_env_line() {
 	fi
 }
 
+# Earlier installers pinned the Codex model in .env. Drop those exact lines so the
+# gateway follows the newest Codex model; anything the user set by hand is kept.
+drop_pinned_models() {
+	tmp="$ENV_FILE.tmp.$$"
+	grep -v -x \
+		-e 'CODEX_MODEL=gpt-5.6-sol' \
+		-e 'CODEX_ADVERTISED_MODELS=gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-5.5' \
+		"$ENV_FILE" >"$tmp" || true
+	mv "$tmp" "$ENV_FILE"
+}
+
 write_env() {
 	if [ ! -f "$ENV_FILE" ]; then
 		{
 			printf 'CODEX_PROVIDER=%s\n' "$PROVIDER"
-			printf 'CODEX_MODEL=gpt-5.6-sol\n'
-			printf 'CODEX_ADVERTISED_MODELS=gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-5.5\n'
 			printf 'CODEX_ALLOW_CLIENT_MODEL_OVERRIDE=1\n'
 			printf 'CODEX_AUTO_UPDATE_CLI=1\n'
 			if [ -n "${CODEX_GATEWAY_TOKEN:-}" ]; then
@@ -109,8 +118,7 @@ write_env() {
 		} >"$ENV_FILE"
 	else
 		ensure_env_line CODEX_PROVIDER "$PROVIDER"
-		ensure_env_line CODEX_MODEL gpt-5.6-sol
-		ensure_env_line CODEX_ADVERTISED_MODELS gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-5.5
+		drop_pinned_models
 		ensure_env_line CODEX_ALLOW_CLIENT_MODEL_OVERRIDE 1
 		ensure_env_line CODEX_AUTO_UPDATE_CLI 1
 		if [ -n "${CODEX_GATEWAY_TOKEN:-}" ]; then

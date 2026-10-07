@@ -42,7 +42,8 @@ from .codex_responses import (
     maybe_refresh_codex_auth,
     warmup_codex_auth,
 )
-from .config import DEFAULT_CODEX_ADVERTISED_MODELS, settings
+from .codex_models import available_codex_models, refresh_codex_models
+from .config import settings
 from .claude_oauth import generate_oauth as claude_oauth_generate
 from .claude_oauth import iter_oauth_stream_events as iter_claude_oauth_events
 from .gemini_cloudcode import generate_cloudcode as gemini_cloudcode_generate
@@ -1558,6 +1559,22 @@ async def _log_startup_config() -> None:
     logger.info(rendered)
 
 
+_CODEX_MODELS_REFRESH_SECONDS = 3600
+_codex_models_task: asyncio.Task | None = None
+
+
+async def _refresh_codex_models_loop() -> None:
+    """Keep the Codex model list current so new models are used without a gateway release."""
+    while True:
+        await refresh_codex_models(
+            codex_cli_home=settings.codex_cli_home,
+            base_url=settings.codex_responses_base_url,
+            version=settings.codex_responses_version,
+            user_agent=settings.codex_responses_user_agent,
+        )
+        await asyncio.sleep(_CODEX_MODELS_REFRESH_SECONDS)
+
+
 @app.on_event("startup")
 async def _warmup_caches() -> None:
     """Pre-warm OAuth/project caches at startup to reduce first-request latency."""
@@ -1571,6 +1588,10 @@ async def _warmup_caches() -> None:
     if provider == "codex" and settings.use_codex_responses_api:
         await warmup_codex_auth(codex_cli_home=settings.codex_cli_home)
     
+    if provider in {"auto", "codex"}:
+        global _codex_models_task
+        _codex_models_task = asyncio.create_task(_refresh_codex_models_loop())
+
     # Warmup Gemini caches if using gemini provider
     if provider == "gemini" and settings.gemini_use_cloudcode_api:
         await warmup_gemini_caches(timeout_seconds=30)
@@ -1601,7 +1622,7 @@ async def list_models(authorization: str | None = Header(default=None)):
     if settings.advertised_models:
         models = settings.advertised_models[:]
     elif forced_provider in {"auto", "codex"}:
-        models = ["default", default_id, *DEFAULT_CODEX_ADVERTISED_MODELS]
+        models = ["default", default_id, *available_codex_models(settings.codex_cli_home)]
     elif forced_provider != "auto" and not settings.allow_client_model_override:
         # When the provider is fixed (operator-controlled), the client-sent `model` string is
         # accepted but ignored by default, so we advertise a stable placeholder plus the

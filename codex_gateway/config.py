@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from .codex_models import latest_codex_model
+
 SandboxMode = Literal["read-only", "workspace-write", "danger-full-access"]
 ApprovalPolicy = Literal["untrusted", "on-failure", "on-request", "never"]
 GatewayProvider = Literal["auto", "codex", "cursor-agent", "claude", "gemini"]
@@ -18,13 +20,6 @@ GatewayProvider = Literal["auto", "codex", "cursor-agent", "claude", "gemini"]
 _GATEWAY_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 _DEFAULT_CODEX_CLI_HOME = os.path.join(_GATEWAY_ROOT, ".codex-gateway-home")
 _FALLBACK_CODEX_VERSION = "0.130.0"
-DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
-DEFAULT_CODEX_ADVERTISED_MODELS = [
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
-]
 
 
 def _maybe_load_dotenv(path: Path) -> None:
@@ -80,7 +75,6 @@ def _apply_preset() -> None:
         # Best defaults for local OpenAI-compatible API usage (fast + safe).
         "codex-fast": {
             "CODEX_PROVIDER": "codex",
-            "CODEX_MODEL": DEFAULT_CODEX_MODEL,
             "CODEX_MODEL_REASONING_EFFORT": "low",
             "CODEX_USE_CODEX_RESPONSES_API": "1",
             "CODEX_SANDBOX": "read-only",
@@ -99,7 +93,6 @@ def _apply_preset() -> None:
         # Allow request-side provider prefixes (cursor:/claude:/gemini:) in `model`.
         "multi-fast": {
             "CODEX_PROVIDER": "auto",
-            "CODEX_MODEL": DEFAULT_CODEX_MODEL,
             "CODEX_MODEL_REASONING_EFFORT": "low",
             "CODEX_USE_CODEX_RESPONSES_API": "1",
             "CODEX_SANDBOX": "read-only",
@@ -118,7 +111,6 @@ def _apply_preset() -> None:
         # Open-AutoGLM / phone automation focused.
         "autoglm-phone": {
             "CODEX_PROVIDER": "codex",
-            "CODEX_MODEL": DEFAULT_CODEX_MODEL,
             "CODEX_MODEL_REASONING_EFFORT": "low",
             "CODEX_USE_CODEX_RESPONSES_API": "1",
             "CODEX_SANDBOX": "read-only",
@@ -211,7 +203,6 @@ def _apply_preset_env() -> None:
         # Open-AutoGLM style phone UI automation (action parsing + screenshots).
         "autoglm-phone": {
             "CODEX_PROVIDER": "codex",
-            "CODEX_MODEL": DEFAULT_CODEX_MODEL,
             "CODEX_USE_CODEX_RESPONSES_API": "1",
             "CODEX_MODEL_REASONING_EFFORT": "low",
             "CODEX_DISABLE_SHELL_TOOL": "1",
@@ -411,7 +402,9 @@ class Settings:
     )
 
     # Codex CLI options.
-    default_model: str = os.environ.get("CODEX_MODEL", DEFAULT_CODEX_MODEL)
+    # Pinned Codex model. Empty or "auto" follows the newest model Codex lists, so new
+    # OpenAI releases are picked up without a gateway release (see `default_model`).
+    codex_model: str = _env_str("CODEX_MODEL", "").strip()
     # Some local Codex configs default to xhigh, which is not accepted by all models.
     model_reasoning_effort: str | None = (
         _env_str("CODEX_MODEL_REASONING_EFFORT", "low").strip() or None
@@ -457,7 +450,7 @@ class Settings:
     provider: GatewayProvider = _env_str("CODEX_PROVIDER", "auto").strip().lower()  # type: ignore[assignment]
     # If true, always allow request `model` prefixes (cursor:/claude:/gemini:) to override provider.
     allow_client_provider_override: bool = _env_bool("CODEX_ALLOW_CLIENT_PROVIDER_OVERRIDE", False)
-    # If true, allow the client to choose the provider-specific model (e.g. pass `gpt-5.6-sol` to Codex,
+    # If true, allow the client to choose the provider-specific model (e.g. pass `gpt-6.1-sol` to Codex,
     # or pass `sonnet` to Claude) via the request `model` field. When false, the gateway uses its
     # configured defaults (e.g. CURSOR_AGENT_MODEL / CLAUDE_MODEL / GEMINI_MODEL) and ignores the
     # client-sent model string (still accepted for OpenAI client compatibility).
@@ -582,6 +575,12 @@ class Settings:
     )
     audit_redact_headers: bool = _env_bool("CODEX_AUDIT_REDACT_HEADERS", True)
     log_redact_authorization: bool = _env_bool("CODEX_LOG_REDACT_AUTHORIZATION", True)
+
+    @property
+    def default_model(self) -> str:
+        if self.codex_model and self.codex_model.lower() != "auto":
+            return self.codex_model
+        return latest_codex_model(self.codex_cli_home)
 
     def effective_log_mode(self) -> str:
         mode = (self.log_mode or "").strip().lower()
